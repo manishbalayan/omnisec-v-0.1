@@ -1,0 +1,18 @@
+[package]
+name = "omnisec-support-bundle"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "omnisec-support-bundle"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+uuid.workspace = true

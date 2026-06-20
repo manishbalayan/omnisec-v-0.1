@@ -1,0 +1,14 @@
+[package]
+name = "omnisec-messaging"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+futures = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+async-nats.workspace = true
+omnisec-events = { path = "../events" }

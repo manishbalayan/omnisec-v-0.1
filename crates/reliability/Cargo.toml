@@ -1,0 +1,15 @@
+[package]
+name = "omnisec-reliability"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true

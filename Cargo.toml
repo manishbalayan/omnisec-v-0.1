@@ -1,0 +1,89 @@
+[workspace]
+members = [
+    "crates/events",
+    "crates/messaging",
+    "crates/monitoring",
+    "crates/network",
+    "crates/fingerprint",
+    "crates/anomaly",
+    "crates/security",
+    "crates/discovery",
+    "crates/storage",
+    "crates/alerts",
+    "crates/reliability",
+    "crates/restart",
+    "crates/systemd",
+    "crates/chaos",
+    "crates/decision",
+    "crates/enforcement",
+    "crates/runtime",
+    "crates/intelligence",
+    "crates/ebpf-common",
+    "crates/ebpf-bpf",
+    "crates/ebpf",
+    "crates/identity",
+    "services/daemon",
+    "services/proxy",
+    "services/policy-engine",
+    "services/doctor",
+    "services/support-bundle",
+    "apps/api",
+    "tests/e2e",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "postgres", "uuid", "chrono"] }
+redis = { version = "0.25", features = ["tokio-comp"] }
+async-nats = "0.35"
+tower-http = { version = "0.5", features = ["cors"] }
+http = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+anyhow = "1"
+
+# Internal crate workspace dependencies
+omnisec-events = { path = "crates/events" }
+omnisec-messaging = { path = "crates/messaging" }
+omnisec-monitoring = { path = "crates/monitoring" }
+omnisec-network = { path = "crates/network" }
+omnisec-fingerprint = { path = "crates/fingerprint" }
+omnisec-anomaly = { path = "crates/anomaly" }
+omnisec-security = { path = "crates/security" }
+omnisec-discovery = { path = "crates/discovery" }
+omnisec-storage = { path = "crates/storage" }
+omnisec-alerts = { path = "crates/alerts" }
+omnisec-reliability = { path = "crates/reliability" }
+omnisec-restart = { path = "crates/restart" }
+omnisec-systemd = { path = "crates/systemd" }
+omnisec-chaos = { path = "crates/chaos" }
+omnisec-decision = { path = "crates/decision" }
+omnisec-enforcement = { path = "crates/enforcement" }
+omnisec-runtime = { path = "crates/runtime" }
+omnisec-intelligence = { path = "crates/intelligence" }
+omnisec-ebpf-common = { path = "crates/ebpf-common" }
+omnisec-ebpf-bpf = { path = "crates/ebpf-bpf" }
+omnisec-ebpf = { path = "crates/ebpf" }
+omnisec-identity = { path = "crates/identity" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
+codegen-units = 1
+strip = "symbols"

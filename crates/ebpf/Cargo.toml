@@ -1,0 +1,25 @@
+[package]
+name = "omnisec-ebpf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+omnisec-events.workspace = true
+omnisec-ebpf-common = { path = "../ebpf-common" }
+omnisec-messaging.workspace = true
+omnisec-identity.workspace = true
+omnisec-network.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.11" }
+
+[features]
+default = []
+ebpf-native = []

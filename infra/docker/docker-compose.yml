@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: omnisec
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js"]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/omnisec
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  daemon:
+    build:
+      context: .
+      dockerfile: services/daemon/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/omnisec
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      OMNISEC_API_KEY: ${OMNISEC_API_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host/proc:ro
+    # WARNING: This container needs elevated privileges to read /proc/*/environ
+    # and /proc/*/net/tcp for agent discovery. In production, consider:
+    #   cap_add: [SYS_PTRACE, NET_ADMIN, DAC_READ_SEARCH] (Linux only)
+    #   or run discovery as a separate sidecar with limited scope.
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+      - DAC_READ_SEARCH
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  proxy:
+    build:
+      context: .
+      dockerfile: services/proxy/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PROXY_TARGET: https://api.openai.com
+      PROXY_BIND: "0.0.0.0:8080"
+
+  policy-engine:
+    build:
+      context: .
+      dockerfile: services/policy-engine/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      POLICY_ENGINE_BIND: "0.0.0.0:3001"
+      OMNISEC_API_KEY: ${OMNISEC_API_KEY}
+
+  dashboard:
+    build:
+      context: apps/dashboard
+    ports:
+      - "3002:3000"
+    environment:
+      API_URL: http://api:3000
+
+volumes:
+  postgres_data:

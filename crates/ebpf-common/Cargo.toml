@@ -1,0 +1,6 @@
+[package]
+name = "omnisec-ebpf-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

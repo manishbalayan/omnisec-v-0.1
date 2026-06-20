@@ -1,0 +1,36 @@
+[package]
+name = "omnisec-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "omnisec-daemon"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+omnisec-discovery = { path = "../../crates/discovery" }
+omnisec-monitoring = { path = "../../crates/monitoring" }
+omnisec-alerts = { path = "../../crates/alerts" }
+omnisec-storage = { path = "../../crates/storage" }
+omnisec-events = { path = "../../crates/events" }
+omnisec-messaging = { path = "../../crates/messaging" }
+omnisec-anomaly = { path = "../../crates/anomaly" }
+omnisec-fingerprint = { path = "../../crates/fingerprint" }
+omnisec-network = { path = "../../crates/network" }
+omnisec-security = { path = "../../crates/security" }
+omnisec-reliability = { path = "../../crates/reliability" }
+omnisec-decision = { path = "../../crates/decision" }
+omnisec-enforcement = { path = "../../crates/enforcement" }
+omnisec-runtime = { path = "../../crates/runtime" }
+omnisec-ebpf = { path = "../../crates/ebpf" }
+omnisec-ebpf-common = { path = "../../crates/ebpf-common" }
+omnisec-identity = { path = "../../crates/identity" }

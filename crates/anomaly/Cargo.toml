@@ -1,0 +1,14 @@
+[package]
+name = "omnisec-anomaly"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+omnisec-events.workspace = true
