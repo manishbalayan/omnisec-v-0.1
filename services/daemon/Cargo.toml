@@ -34,3 +34,4 @@ omnisec-runtime = { path = "../../crates/runtime" }
 omnisec-ebpf = { path = "../../crates/ebpf" }
 omnisec-ebpf-common = { path = "../../crates/ebpf-common" }
 omnisec-identity = { path = "../../crates/identity" }
+libc = "0.2"

@@ -1621,6 +1621,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "libc",
  "omnisec-alerts",
  "omnisec-anomaly",
  "omnisec-decision",

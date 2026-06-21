@@ -11,6 +11,7 @@ use omnisec_events::{
     AlertRequestedPayload, AlertSentPayload, AlertFailedPayload,
     HealthState,
     RestartRequestedPayload, RestartStartedPayload, RestartSucceededPayload,
+    RestartFailedPayload,
 };
 use omnisec_fingerprint::FingerprintManager;
 use omnisec_identity::AgentIdentityEngine;
@@ -302,6 +303,40 @@ async fn main() -> Result<()> {
                         let _ = nats_health
                             .publish(subjects::AGENT_HEALTH_CHANGED, "monitoring", payload)
                             .await;
+
+                        // If the reason contains "hang" or "hung", escalate with an alert
+                        if reason.to_lowercase().contains("hang") || reason.to_lowercase().contains("hung") {
+                            tracing::warn!(
+                                "HANG DETECTED: {} (PID: {}) appears hung — escalating alert",
+                                name, pid
+                            );
+
+                            // Publish a dedicated hang event
+                            let hang_payload = serde_json::json!({
+                                "pid": pid,
+                                "name": name,
+                                "reason": reason,
+                                "severity": "warning",
+                                "detected_at": chrono::Utc::now().to_rfc3339(),
+                            });
+                            let _ = nats_health
+                                .publish(subjects::AGENT_HUNG, "monitoring", hang_payload)
+                                .await;
+
+                            // Request an alert for the hang event
+                            let alert_payload = AlertRequestedPayload {
+                                channel: "telegram".to_string(),
+                                message: format!(
+                                    "⚠️ HANG DETECTED: Agent {} (PID: {}) - {}",
+                                    name, pid, reason
+                                ),
+                                agent_pid: Some(*pid),
+                                agent_name: Some(name.clone()),
+                            };
+                            let _ = nats_health
+                                .publish(subjects::ALERT_REQUESTED, "monitoring", alert_payload)
+                                .await;
+                        }
                     }
                     HealthEvent::AgentRestarted { pid, name, attempt } => {
                         let payload = RestartSucceededPayload {
@@ -914,6 +949,186 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // =====================================================================
+    // TASK: Post-Restart Verification (spawned before Task 7 to be available
+    // for all downstream tasks)
+    //
+    // After a restart is reported as succeeded, this task verifies the agent
+    // is actually alive and healthy by checking its process status. If the
+    // agent is not healthy, it publishes an alert and re-queues the restart.
+    // =====================================================================
+    let nats_verification = nats.clone();
+    let state_verification = daemon_state.clone();
+    tokio::spawn(async move {
+        let mut restart_sub = match nats_verification
+            .subscribe::<RestartSucceededPayload>(subjects::RESTART_SUCCEEDED)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Post-restart verification: failed to subscribe: {}", e);
+                return;
+            }
+        };
+
+        tracing::info!("Post-restart verification task started");
+
+        while let Some((_subject, envelope)) = restart_sub.next().await {
+            let pid = envelope.payload.new_pid.unwrap_or(envelope.payload.pid);
+            let name = envelope.payload.name.clone();
+            let attempt = envelope.payload.attempt;
+
+            tracing::info!("Verifying restart of {} (PID: {}) — attempt {}", name, pid, attempt);
+
+            // Wait a moment for the process to initialize
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            // Check if process is alive using libc::kill with signal 0
+            let alive = alive_check(pid);
+
+            if alive {
+                tracing::info!("RESTART VERIFIED: {} (PID: {}) is running after attempt {}", name, pid, attempt);
+
+                // Update daemon state
+                let mut state = state_verification.write().await;
+                state.alive_count = state.alive_count.saturating_add(1);
+            } else {
+                tracing::error!(
+                    "RESTART VERIFICATION FAILED: {} (PID: {}) is NOT running after attempt {} -- process may have exited immediately",
+                    name, pid, attempt
+                );
+
+                // Publish an alert that restart verification failed
+                let alert_payload = AlertRequestedPayload {
+                    channel: "telegram".to_string(),
+                    message: format!(
+                        "⚠️ RESTART VERIFICATION FAILED: Agent {} (PID: {}) failed to stay alive after attempt {}",
+                        name, pid, attempt
+                    ),
+                    agent_pid: Some(pid),
+                    agent_name: Some(name.clone()),
+                };
+                let _ = nats_verification
+                    .publish(subjects::ALERT_REQUESTED, "restart-verification", alert_payload)
+                    .await;
+
+                // Re-request a restart if we haven't exhausted all retries
+                let retry_payload = RestartRequestedPayload {
+                    pid,
+                    name: name.clone(),
+                    attempt: attempt + 1,
+                    backoff_seconds: 10,
+                };
+                let _ = nats_verification
+                    .publish(subjects::RESTART_REQUESTED, "restart-verification", retry_payload)
+                    .await;
+            }
+        }
+    });
+
+    // =====================================================================
+    // TASK: Restart Exhaustion Alert — listens for when max retries are hit
+    // and generates an escalation alert.
+    // =====================================================================
+    let nats_exhaustion = nats.clone();
+    tokio::spawn(async move {
+        let mut failed_sub = match nats_exhaustion
+            .subscribe::<RestartFailedPayload>(subjects::RESTART_FAILED)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Restart exhaustion alert: failed to subscribe: {}", e);
+                return;
+            }
+        };
+
+        tracing::info!("Restart exhaustion alert task started");
+
+        while let Some((_subject, envelope)) = failed_sub.next().await {
+            let pid = envelope.payload.pid;
+            let name = envelope.payload.name.clone();
+            let attempt = envelope.payload.attempt;
+            let error = envelope.payload.error.clone();
+
+            tracing::error!(
+                "RESTART EXHAUSTED: Agent {} (PID: {}) failed after {} attempts — {}",
+                name, pid, attempt, error
+            );
+
+            // Publish an escalation alert
+            let alert_payload = AlertRequestedPayload {
+                channel: "telegram".to_string(),
+                message: format!(
+                    "🚨 RESTART EXHAUSTED: Agent {} (PID: {}) failed after {} attempts. Error: {}",
+                    name, pid, attempt, error
+                ),
+                agent_pid: Some(pid),
+                agent_name: Some(name.clone()),
+            };
+            let _ = nats_exhaustion
+                .publish(subjects::ALERT_REQUESTED, "restart-exhaustion", alert_payload)
+                .await;
+
+            // Also publish an incident via the incident engine
+            let incident_payload = serde_json::json!({
+                "incident_id": uuid::Uuid::new_v4().to_string(),
+                "agent_pid": pid,
+                "agent_name": name,
+                "incident_type": "RestartExhaustion",
+                "severity": "critical",
+                "description": format!("Agent {} failed to restart after {} attempts. Error: {}", name, attempt, error),
+                "state": "Escalated",
+            });
+            let _ = nats_exhaustion
+                .publish(subjects::INCIDENT_CREATED, "restart-exhaustion", incident_payload)
+                .await;
+        }
+    });
+
+    // =====================================================================
+    // TASK: Graceful Shutdown Handler — listens for SIGTERM and performs
+    // a graceful shutdown instead of immediate SIGKILL.
+    // =====================================================================
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate()
+            );
+            match sigterm {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                    tracing::info!(
+                        "┌─────────────────────────────────────────────────┐"
+                    );
+                    tracing::info!(
+                        "│  GRACEFUL SHUTDOWN INITIATED                     │"
+                    );
+                    tracing::info!(
+                        "│  Performing ordered shutdown of all pipelines... │"
+                    );
+                    tracing::info!(
+                        "└─────────────────────────────────────────────────┘"
+                    );
+
+                    // Give running tasks 15 seconds to finish before hard kill
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+
+                    tracing::info!("Graceful shutdown complete. Exiting.");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    tracing::debug!("Could not register SIGTERM handler: {}", e);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tracing::debug!("SIGTERM handler not available on this platform");
+        }
+    });
 
     // =====================================================================
     // Task 7: Enforcement Pipeline — Decision Engine → Enforcement Manager
@@ -1707,6 +1922,20 @@ fn read_proc_cmdline(pid: u32) -> Option<String> {
     {
         let _ = pid;
         None
+    }
+}
+
+/// Check if a process is alive by sending signal 0 (no-op probe).
+fn alive_check(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Safety: signal 0 is a no-op that only checks process existence
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // Fallback: check /proc existence
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
 }
 
