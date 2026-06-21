@@ -55,11 +55,17 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Omnisec API v0.1.0");
 
-    if std::env::var("OMNISEC_API_KEY").is_err() {
+    let api_key = std::env::var("OMNISEC_API_KEY").unwrap_or_else(|_| {
+        let key = uuid::Uuid::new_v4().to_string();
         tracing::warn!(
-            "OMNISEC_API_KEY not set. API authentication is DISABLED. Set this in production."
+            "OMNISEC_API_KEY not set. Generated temporary key: {}. Set OMNISEC_API_KEY in production.",
+            key
         );
-    }
+        key
+    });
+
+    // Pre-cache the API key for the auth middleware (ignore error if already set)
+    let _ = API_KEY.set(Some(api_key));
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/omnisec".to_string());
@@ -93,7 +99,9 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers(tower_http::cors::Any);
 
     let app = Router::new()
-        .route("/", get(health_check))
+        // Health endpoints — always accessible
+        .route("/", get(root_health_check))
+        .route("/health", get(health_check_handler))
         .route("/api/agents", get(list_agents))
         .route("/api/agents/discover", post(discover_agents))
         .route("/api/events", get(list_events))
@@ -142,8 +150,9 @@ async fn auth_middleware(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Health endpoint is always accessible
-    if request.uri().path() == "/" {
+    // Health endpoints and metrics are always accessible
+    let path = request.uri().path();
+    if path == "/" || path == "/health" || path == "/metrics" {
         return next.run(request).await;
     }
 
@@ -153,10 +162,19 @@ async fn auth_middleware(
         return next.run(request).await;
     };
 
+    // Accept API key via either X-API-Key header or Authorization: Bearer <key>
     let provided = request
         .headers()
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            request
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|s| s.trim())
+        })
         .unwrap_or("");
 
     if provided == expected {
@@ -174,10 +192,28 @@ async fn auth_middleware(
     }
 }
 
-async fn health_check() -> Json<Value> {
+async fn root_health_check() -> Json<Value> {
     Json(json!({
         "status": "healthy",
         "service": "omnisec-api"
+    }))
+}
+
+async fn health_check_handler() -> Json<Value> {
+    Json(json!({
+        "status": "healthy",
+        "service": "omnisec-api",
+        "version": "0.2.0",
+        "endpoints": [
+            "/",
+            "/health",
+            "/metrics",
+            "/api/agents",
+            "/api/events",
+            "/api/security/*",
+            "/api/enforcement/*",
+            "/api/intelligence/*"
+        ]
     }))
 }
 
