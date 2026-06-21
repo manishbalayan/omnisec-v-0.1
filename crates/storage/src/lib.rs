@@ -101,7 +101,7 @@ impl Storage {
         }
 
         sqlx::query(
-            "INSERT INTO events (id, organization_id, agent_id, event_type, severity, message, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO events (id, organization_id, agent_id, event_type, severity, message, created_at) VALUES ($1, $2, $3, $4, $5::text::event_severity, $6, $7)"
         )
         .bind(id)
         .bind(self.default_org_id)
