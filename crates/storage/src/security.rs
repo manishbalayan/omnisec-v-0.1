@@ -51,7 +51,7 @@ impl SecurityStorage {
 
     pub async fn get_destinations(&self, pid: i32) -> Result<Vec<Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT row_to_json(t) FROM (
+            r#"SELECT row_to_json(t)::text FROM (
                 SELECT * FROM security_destination_profiles WHERE pid = $1 ORDER BY last_seen DESC
             ) t"#,
         )
@@ -148,7 +148,7 @@ impl SecurityStorage {
 
     pub async fn get_fingerprints(&self, pid: i32) -> Result<Vec<Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT row_to_json(t) FROM (
+            r#"SELECT row_to_json(t)::text FROM (
                 SELECT * FROM security_fingerprints WHERE pid = $1 ORDER BY version DESC
             ) t"#,
         )
@@ -199,7 +199,7 @@ impl SecurityStorage {
 
     pub async fn get_risk_scores(&self) -> Result<Vec<Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT row_to_json(t) FROM (SELECT * FROM security_risk_scores ORDER BY total_score DESC) t"#,
+            r#"SELECT row_to_json(t)::text FROM (SELECT * FROM security_risk_scores ORDER BY total_score DESC) t"#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -249,7 +249,7 @@ impl SecurityStorage {
     pub async fn get_incidents(&self, pid: Option<i32>) -> Result<Vec<Value>> {
         let rows = if let Some(pid) = pid {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (
+                r#"SELECT row_to_json(t)::text FROM (
                     SELECT * FROM security_incidents WHERE pid = $1 ORDER BY created_at DESC
                 ) t"#,
             )
@@ -258,7 +258,7 @@ impl SecurityStorage {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (SELECT * FROM security_incidents ORDER BY created_at DESC) t"#,
+                r#"SELECT row_to_json(t)::text FROM (SELECT * FROM security_incidents ORDER BY created_at DESC) t"#,
             )
             .fetch_all(&self.pool)
             .await?
@@ -297,7 +297,7 @@ impl SecurityStorage {
 
     pub async fn get_baseline_states(&self) -> Result<Vec<Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT row_to_json(t) FROM (SELECT * FROM security_baseline_state ORDER BY pid) t"#,
+            r#"SELECT row_to_json(t)::text FROM (SELECT * FROM security_baseline_state ORDER BY pid) t"#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -332,7 +332,7 @@ impl SecurityStorage {
 
     pub async fn get_audit_trail(&self, limit: i64) -> Result<Vec<Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            r#"SELECT row_to_json(t) FROM (
+            r#"SELECT row_to_json(t)::text FROM (
                 SELECT * FROM security_audit_trail ORDER BY created_at DESC LIMIT $1
             ) t"#,
         )
@@ -375,7 +375,7 @@ impl SecurityStorage {
     pub async fn get_timeline(&self, pid: Option<i32>, limit: i64) -> Result<Vec<Value>> {
         let rows = if let Some(pid) = pid {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (
+                r#"SELECT row_to_json(t)::text FROM (
                     SELECT * FROM security_timeline WHERE pid = $1 ORDER BY created_at DESC LIMIT $2
                 ) t"#,
             )
@@ -385,7 +385,7 @@ impl SecurityStorage {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (
+                r#"SELECT row_to_json(t)::text FROM (
                     SELECT * FROM security_timeline ORDER BY created_at DESC LIMIT $1
                 ) t"#,
             )
@@ -429,7 +429,7 @@ impl SecurityStorage {
     pub async fn get_correlation_alerts(&self, unresolved_only: bool) -> Result<Vec<Value>> {
         let rows = if unresolved_only {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (
+                r#"SELECT row_to_json(t)::text FROM (
                     SELECT * FROM security_correlation_alerts WHERE resolved = false ORDER BY created_at DESC
                 ) t"#,
             )
@@ -437,7 +437,7 @@ impl SecurityStorage {
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                r#"SELECT row_to_json(t) FROM (
+                r#"SELECT row_to_json(t)::text FROM (
                     SELECT * FROM security_correlation_alerts ORDER BY created_at DESC LIMIT 100
                 ) t"#,
             )

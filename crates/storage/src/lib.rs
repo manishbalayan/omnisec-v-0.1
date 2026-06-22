@@ -116,14 +116,14 @@ impl Storage {
         Ok(id)
     }
 
-    pub async fn get_agents(&self) -> Result<String> {
+    pub async fn get_agents(&self) -> Result<Vec<serde_json::Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT row_to_json(t) FROM (SELECT * FROM agents ORDER BY created_at DESC) t"
+            "SELECT row_to_json(t)::text FROM (SELECT * FROM agents ORDER BY created_at DESC) t"
         )
         .fetch_all(&self.pool)
         .await?;
         
-        Ok(format!("[{}]", rows.join(",")))
+        Ok(rows.iter().filter_map(|r| serde_json::from_str(r).ok()).collect())
     }
 
     pub async fn update_agent_status(&self, agent_id: Uuid, status: &str) -> Result<()> {
@@ -155,22 +155,22 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn get_events(&self, agent_id: Option<Uuid>) -> Result<String> {
+    pub async fn get_events(&self, agent_id: Option<Uuid>) -> Result<Vec<serde_json::Value>> {
         let rows = if let Some(agent_id) = agent_id {
             sqlx::query_scalar::<_, String>(
-                "SELECT row_to_json(t) FROM (SELECT * FROM events WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 100) t"
+                "SELECT row_to_json(t)::text FROM (SELECT * FROM events WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 100) t"
             )
             .bind(agent_id)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT row_to_json(t) FROM (SELECT * FROM events ORDER BY created_at DESC LIMIT 100) t"
+                "SELECT row_to_json(t)::text FROM (SELECT * FROM events ORDER BY created_at DESC LIMIT 100) t"
             )
             .fetch_all(&self.pool)
             .await?
         };
         
-        Ok(format!("[{}]", rows.join(",")))
+        Ok(rows.iter().filter_map(|r| serde_json::from_str(r).ok()).collect())
     }
 }
