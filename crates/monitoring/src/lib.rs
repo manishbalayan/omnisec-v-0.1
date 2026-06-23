@@ -3,6 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// Returns the proc mount path to use for monitoring.
+/// When running in a Docker container with `-v /proc:/host/proc:ro`,
+/// we read from `/host/proc` to see host processes. Falls back to `/proc`.
+fn proc_root() -> &'static str {
+    if std::path::Path::new("/host/proc").exists() {
+        "/host/proc"
+    } else {
+        "/proc"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent health state machine
 // ---------------------------------------------------------------------------
@@ -444,14 +455,15 @@ fn get_process_stats(pid: u32) -> Option<(f64, f64)> {
 
 #[cfg(target_os = "linux")]
 fn get_process_stats_linux(pid: u32) -> Option<(f64, f64)> {
-    let status = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let proc = proc_root();
+    let status = std::fs::read_to_string(format!("{}/{}/stat", proc, pid)).ok()?;
     let fields: Vec<&str> = status.split_whitespace().collect();
     if fields.len() >= 22 {
         let utime: f64 = fields[13].parse().ok()?;
         let stime: f64 = fields[14].parse().ok()?;
         let total_ticks = utime + stime;
         // Read system uptime to compute approximate CPU percentage
-        let uptime_info = std::fs::read_to_string("/proc/uptime").ok()?;
+        let uptime_info = std::fs::read_to_string(format!("{}/uptime", proc)).ok()?;
         let uptime_secs: f64 = uptime_info.split_whitespace().next()?.parse().ok()?;
         // Convert ticks (usually 100 per second on Linux) to seconds
         let clk_tck: f64 = 100.0;
@@ -500,7 +512,8 @@ fn get_process_stats_macos(pid: u32) -> Option<(f64, f64)> {
 fn read_cpu_ticks(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+        let proc = proc_root();
+        let stat = std::fs::read_to_string(format!("{}/{}/stat", proc, pid)).ok()?;
         let fields: Vec<&str> = stat.split_whitespace().collect();
         if fields.len() < 15 { return None; }
         let utime: u64 = fields[13].parse().ok()?;

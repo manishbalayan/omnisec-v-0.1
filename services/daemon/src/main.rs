@@ -990,9 +990,12 @@ async fn main() -> Result<()> {
             if alive {
                 tracing::info!("RESTART VERIFIED: {} (PID: {}) is running after attempt {}", name, pid, attempt);
 
-                // Update daemon state
-                let mut state = state_verification.write().await;
-                state.alive_count = state.alive_count.saturating_add(1);
+                // Update daemon state — alive_count is set to the total agent count,
+                // which is more accurate than incrementing (avoids double-counting)
+                {
+                    let state = state_verification.read().await;
+                    tracing::info!("Restart verification: agent count = {}, alive = {}", state.agent_count, state.alive_count);
+                }
             } else {
                 tracing::error!(
                     "RESTART VERIFICATION FAILED: {} (PID: {}) is NOT running after attempt {} -- process may have exited immediately",
@@ -1903,11 +1906,21 @@ fn sd_notify(state: &str) {
     }
 }
 
+/// Return the proc mount path, checking /host/proc first for Docker deployments.
+fn proc_root() -> &'static str {
+    if std::path::Path::new("/host/proc").exists() {
+        "/host/proc"
+    } else {
+        "/proc"
+    }
+}
+
 /// Read /proc/[pid]/cmdline and return as a space-joined command string.
 fn read_proc_cmdline(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let content = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
+        let proc = proc_root();
+        let content = std::fs::read(format!("{}/{}/cmdline", proc, pid)).ok()?;
         // cmdline is NUL-separated
         let args: Vec<String> = content
             .split(|&b| b == 0)
@@ -1934,8 +1947,9 @@ fn alive_check(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Fallback: check /proc existence
-        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+        // Fallback: check proc entry existence
+        let proc = proc_root();
+        std::path::Path::new(&format!("{}/{}", proc, pid)).exists()
     }
 }
 

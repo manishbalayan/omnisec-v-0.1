@@ -1,0 +1,47 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Rust build artifacts
+/target/
+
+# Node.js
+node_modules/
+apps/dashboard/node_modules/
+
+# Tests
+tests/
+**/*.test.rs
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+**/tests/
+**/test_*
+
+# Documentation
+docs/
+README.md
+RELEASE.md
+VERSION_AUDIT.md
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.log
+
+# Certifications
+certification_results/
+
+# macOS
+.DS_Store
+~/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

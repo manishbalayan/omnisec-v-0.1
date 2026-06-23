@@ -1,0 +1,226 @@
+# =============================================================================
+# OmniSec All-in-One Image
+# =============================================================================
+# This Dockerfile builds a single container that runs OmniSec Reliability services:
+#   PostgreSQL, NATS, API, Daemon, Dashboard
+#
+# USAGE:
+#   docker build -t omnisec/omnisec -f deploy/Dockerfile.all-in-one .
+#   docker run -p 3000:3000 -v omnisec_data:/var/lib/omnisec omnisec/omnisec
+#
+# The entrypoint auto-generates all secrets and starts services in order.
+# Dashboard available at http://localhost:3000
+# =============================================================================
+
+# ---- Stage 1: Build Rust binaries ----
+FROM rust:1.91-slim AS rust-builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Leverage Docker layer caching by copying manifests first
+COPY Cargo.toml Cargo.lock ./
+COPY crates/events/Cargo.toml crates/events/
+COPY crates/messaging/Cargo.toml crates/messaging/
+COPY crates/monitoring/Cargo.toml crates/monitoring/
+COPY crates/network/Cargo.toml crates/network/
+COPY crates/fingerprint/Cargo.toml crates/fingerprint/
+COPY crates/anomaly/Cargo.toml crates/anomaly/
+COPY crates/security/Cargo.toml crates/security/
+COPY crates/discovery/Cargo.toml crates/discovery/
+COPY crates/storage/Cargo.toml crates/storage/
+COPY crates/alerts/Cargo.toml crates/alerts/
+COPY crates/reliability/Cargo.toml crates/reliability/
+COPY crates/restart/Cargo.toml crates/restart/
+COPY crates/systemd/Cargo.toml crates/systemd/
+COPY crates/chaos/Cargo.toml crates/chaos/
+COPY crates/decision/Cargo.toml crates/decision/
+COPY crates/enforcement/Cargo.toml crates/enforcement/
+COPY crates/runtime/Cargo.toml crates/runtime/
+COPY crates/intelligence/Cargo.toml crates/intelligence/
+COPY crates/ebpf-common/Cargo.toml crates/ebpf-common/
+COPY crates/ebpf-bpf/Cargo.toml crates/ebpf-bpf/
+COPY crates/ebpf/Cargo.toml crates/ebpf/
+COPY crates/identity/Cargo.toml crates/identity/
+COPY services/daemon/Cargo.toml services/daemon/
+COPY apps/api/Cargo.toml apps/api/
+COPY services/doctor/Cargo.toml services/doctor/
+COPY services/support-bundle/Cargo.toml services/support-bundle/
+COPY tests/e2e/Cargo.toml tests/e2e/
+
+RUN mkdir -p \
+    crates/events/src \
+    crates/messaging/src \
+    crates/monitoring/src \
+    crates/network/src \
+    crates/fingerprint/src \
+    crates/anomaly/src \
+    crates/security/src \
+    crates/discovery/src \
+    crates/storage/src \
+    crates/alerts/src \
+    crates/reliability/src \
+    crates/restart/src \
+    crates/systemd/src \
+    crates/chaos/src \
+    crates/decision/src \
+    crates/enforcement/src \
+    crates/runtime/src \
+    crates/intelligence/src \
+    crates/ebpf-common/src \
+    crates/ebpf-bpf/src \
+    crates/ebpf/src \
+    crates/identity/src \
+    services/daemon/src \
+    apps/api/src \
+    services/doctor/src \
+    services/support-bundle/src \
+    tests/e2e/src \
+    crates/storage/migrations
+
+# Create placeholder source files for dependency resolution
+RUN for dir in crates/*/src services/*/src apps/*/src; do \
+        if [ "$(ls -A "$dir" 2>/dev/null)" = "" ]; then \
+            echo "// placeholder" > "$dir/lib.rs"; \
+        fi \
+    done
+
+# Pre-build dependencies (this layer is cached as long as Cargo.toml/lock don't change)
+RUN cargo fetch
+
+# Copy actual source
+COPY . .
+
+# Build release binaries
+RUN cargo build --release --bin omnisec-api && \
+    cargo build --release --bin omnisec-daemon && \
+    cargo build --release --bin omnisec-doctor
+
+# Strip debug symbols
+RUN strip /app/target/release/omnisec-api \
+        /app/target/release/omnisec-daemon \
+        /app/target/release/omnisec-doctor
+
+# ---- Stage 2: Build Next.js Dashboard ----
+FROM node:18-alpine AS dashboard-builder
+
+WORKDIR /app
+COPY apps/dashboard/package*.json ./
+# Use npm install instead of npm ci because package-lock.json is not checked in
+RUN npm install
+COPY apps/dashboard/ .
+
+# NEXT_PUBLIC_API_URL is baked into the client JS bundle at build time
+# Use a recognizable placeholder that the entrypoint will replace at startup
+# with the actual port (from OMNISEC_API_EXTERNAL_PORT env var)
+ENV NEXT_PUBLIC_API_URL="http://omnisec-api-placeholder:3002"
+
+RUN npm run build
+
+# ---- Stage 3: Runtime image ----
+FROM debian:bookworm-slim
+
+# Prevent debconf from asking questions
+ENV DEBIAN_FRONTEND=noninteractive
+
+# =============================================================================
+# Install runtime dependencies
+# =============================================================================
+# We bundle all infrastructure inside the single container:
+#   postgres-16  → persistent agent/event data
+#   nats-server  → inter-service event bus (with JetStream)
+#   supervisor   → process manager (starts all services in order)
+# =============================================================================
+
+# Add PostgreSQL 16 repository
+RUN apt-get update && apt-get install -y curl gnupg ca-certificates && \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+
+# Install all runtime packages
+RUN apt-get update && apt-get install -y \
+    postgresql-16 \
+    supervisor \
+    procps \
+    iproute2 \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install NATS Server from official release
+RUN curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.10.21/nats-server-v2.10.21-linux-amd64.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/nats-server-v2.10.21-linux-amd64/nats-server /usr/local/bin/ && \
+    rm -rf /tmp/nats-server-v2.10.21-linux-amd64
+
+# =============================================================================
+# Copy OmniSec binaries from Rust builder
+# =============================================================================
+COPY --from=rust-builder /app/target/release/omnisec-api /usr/local/bin/
+COPY --from=rust-builder /app/target/release/omnisec-daemon /usr/local/bin/
+COPY --from=rust-builder /app/target/release/omnisec-doctor /usr/local/bin/
+
+# Copy SQL migrations
+COPY --from=rust-builder /app/crates/storage/migrations /usr/share/omnisec/migrations
+
+# =============================================================================
+# Copy Dashboard (Next.js standalone build)
+# =============================================================================
+COPY --from=dashboard-builder /app/.next/standalone /opt/omnisec-dashboard
+COPY --from=dashboard-builder /app/.next/static /opt/omnisec-dashboard/.next/static
+COPY --from=dashboard-builder /app/public /opt/omnisec-dashboard/public
+
+# =============================================================================
+# Copy deploy configs
+# =============================================================================
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/omnisec.conf
+COPY deploy/entrypoint.sh /usr/local/bin/omnisec-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/omnisec-entrypoint.sh
+
+# =============================================================================
+# Setup directories and permissions
+# =============================================================================
+ENV OMNISEC_DATA_DIR=/var/lib/omnisec
+ENV OMNISEC_PGBIN=/usr/lib/postgresql/16/bin
+
+RUN mkdir -p ${OMNISEC_DATA_DIR}/postgres \
+              ${OMNISEC_DATA_DIR}/nats \
+              ${OMNISEC_DATA_DIR}/logs && \
+    chmod 755 /var/lib/omnisec
+
+# =============================================================================
+# Environment defaults — all overridable, all get auto-generated
+# =============================================================================
+ENV OMNISEC_API_KEY=""
+ENV DATABASE_URL="postgres://omnisec:omnisec@localhost:5432/omnisec"
+ENV NATS_URL="nats://localhost:4222"
+ENV API_BIND="0.0.0.0:3002"
+ENV DASHBOARD_PORT="3000"
+ENV DAEMON_HEALTH_BIND="0.0.0.0:3003"
+ENV OMNISEC_SAFE_MODE="1"
+ENV OMNISEC_RECOMMENDATION_ONLY="1"
+ENV RUST_LOG="info"
+
+# External port overrides — set by the installer at container start
+# OMNISEC_DASHBOARD_EXTERNAL_PORT — host-facing dashboard port (printed in output)
+# OMNISEC_API_EXTERNAL_PORT — host-facing API port (used to patch dashboard JS)
+# OMNISEC_DAEMON_HEALTH_EXTERNAL_PORT — host-facing daemon health port (printed in output)
+
+# The daemon needs to read /proc for agent discovery
+# In Docker, this works naturally since the container shares the host PID namespace
+# capability is set at runtime via --privileged or --cap-add
+
+EXPOSE 3000
+
+# Volume for persistent data
+VOLUME ["/var/lib/omnisec"]
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=35s --retries=3 \
+    CMD curl -fs http://127.0.0.1:3002/health || exit 1
+
+ENTRYPOINT ["omnisec-entrypoint.sh"]

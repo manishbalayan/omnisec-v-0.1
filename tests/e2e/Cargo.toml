@@ -1,7 +1,7 @@
 [package]
 name = "omnisec-e2e"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -17,5 +17,5 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-omnisec-events = { path = "../../crates/events" }
-omnisec-chaos = { path = "../../crates/chaos" }
+omnisec-events.workspace = true
+omnisec-chaos.workspace = true

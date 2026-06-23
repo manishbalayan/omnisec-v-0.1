@@ -1,6 +1,18 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Returns the proc mount path to use for agent discovery.
+/// When running in a Docker container with `-v /proc:/host/proc:ro`,
+/// we read from `/host/proc` to see host processes. Falls back to `/proc`.
+pub fn proc_root() -> &'static str {
+    // Check if /host/proc exists (Docker host proc mount from install.sh)
+    if std::path::Path::new("/host/proc").exists() {
+        "/host/proc"
+    } else {
+        "/proc"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredAgent {
     pub pid: u32,
@@ -127,7 +139,9 @@ impl AgentDiscovery {
 
         let mut agents = Vec::new();
 
-        for entry in fs::read_dir("/proc")? {
+        let proc_path = crate::proc_root();
+
+        for entry in fs::read_dir(proc_path)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
 
@@ -144,10 +158,11 @@ impl AgentDiscovery {
     #[cfg(target_os = "linux")]
     fn parse_proc_entry(&self, pid: u32) -> Option<DiscoveredAgent> {
         use std::fs;
+        let proc = crate::proc_root();
 
-        let comm = fs::read_to_string(format!("/proc/{}/comm", pid)).ok()?;
-        let cmdline = fs::read_to_string(format!("/proc/{}/cmdline", pid)).ok()?;
-        let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+        let comm = fs::read_to_string(format!("{}/{}/comm", proc, pid)).ok()?;
+        let cmdline = fs::read_to_string(format!("{}/{}/cmdline", proc, pid)).ok()?;
+        let stat = fs::read_to_string(format!("{}/{}/stat", proc, pid)).ok()?;
 
         let comm = comm.trim().to_string();
         let cmdline = cmdline.replace('\0', " ");
@@ -252,8 +267,9 @@ impl AgentDiscovery {
     #[cfg(target_os = "linux")]
     fn _get_env_vars_linux(&self, pid: u32) -> Vec<String> {
         use std::fs;
+        let proc = crate::proc_root();
 
-        let env_path = format!("/proc/{}/environ", pid);
+        let env_path = format!("{}/{}/environ", proc, pid);
         if let Ok(content) = fs::read(&env_path) {
             let content = String::from_utf8_lossy(&content);
             content
@@ -275,10 +291,11 @@ impl AgentDiscovery {
     #[cfg(target_os = "linux")]
     fn get_listening_ports(&self, pid: u32) -> Vec<u16> {
         use std::fs;
+        let proc = crate::proc_root();
 
         let mut ports = Vec::new();
-        let tcp_path = format!("/proc/{}/net/tcp", pid);
-        let udp_path = format!("/proc/{}/net/udp", pid);
+        let tcp_path = format!("{}/{}/net/tcp", proc, pid);
+        let udp_path = format!("{}/{}/net/udp", proc, pid);
 
         for path in &[tcp_path, udp_path] {
             if let Ok(content) = fs::read_to_string(path) {
@@ -439,7 +456,8 @@ fn estimate_cpu_percentage(cpu_ticks: f64) -> f64 {
     if cpu_ticks <= 0.0 {
         return 0.0;
     }
-    if let Ok(uptime_str) = std::fs::read_to_string("/proc/uptime") {
+    let uptime_path = format!("{}/uptime", crate::proc_root());
+    if let Ok(uptime_str) = std::fs::read_to_string(&uptime_path) {
         // /proc/uptime format: "uptime_secs idle_secs"
         if let Some(uptime_secs_str) = uptime_str.split_whitespace().next() {
             if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {

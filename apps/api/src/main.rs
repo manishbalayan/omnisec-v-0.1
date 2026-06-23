@@ -18,8 +18,10 @@ use omnisec_discovery::AgentDiscovery;
 use omnisec_enforcement::EnforcementManager;
 use omnisec_fingerprint::FingerprintManager;
 use omnisec_security::AgentProfileManager;
+use omnisec_storage::security::SecurityStorage;
 use omnisec_storage::Storage;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
@@ -64,8 +66,10 @@ async fn main() -> anyhow::Result<()> {
         key
     });
 
-    // Pre-cache the API key for the auth middleware (ignore error if already set)
-    let _ = API_KEY.set(Some(api_key));
+    // Pre-cache the API key for the auth middleware
+    if API_KEY.set(Some(api_key)).is_err() {
+        tracing::warn!("API_KEY was already initialized (possible re-initialization)");
+    }
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/omnisec".to_string());
@@ -127,6 +131,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/intelligence/recommendations", get(get_recommendations))
         .route("/api/intelligence/recommendations/{id}/approve", post(approve_recommendation))
         .route("/api/intelligence/recommendations/{id}/reject", post(reject_recommendation))
+        // Reliability endpoints
+        .route("/api/incidents", get(get_incidents))
+        .route("/api/metrics/reliability", get(get_reliability_metrics))
+        .route("/api/dependencies/health", get(get_dependencies_health))
         // Metrics (Prometheus-compatible text format)
         .route("/metrics", get(prometheus_metrics))
         // CORS must run BEFORE auth so preflight OPTIONS requests are handled
@@ -837,6 +845,236 @@ async fn get_overrides(
         "overrides": overrides,
         "total": overrides.len()
     }))
+}
+
+// =====================================================================
+// Reliability Endpoints
+// =====================================================================
+
+async fn get_incidents(
+    State(state): State<Arc<RwLock<AppState>>>,
+) -> Json<Value> {
+    let state = state.read().await;
+    let sec_storage = SecurityStorage::new(state.storage.pool().clone());
+    match sec_storage.get_incidents(None).await {
+        Ok(rows) => {
+            let incidents: Vec<Value> = rows.iter().map(|i| {
+                let risk_score = i.get("risk_score").and_then(|v| v.as_i64()).unwrap_or(0);
+                let severity = if risk_score >= 91 {
+                    "critical"
+                } else if risk_score >= 71 {
+                    "high"
+                } else if risk_score >= 41 {
+                    "medium"
+                } else {
+                    "low"
+                };
+
+                let duration_ms = i.get("resolved_at")
+                    .and_then(|v| v.as_str())
+                    .and_then(|resolved_str| {
+                        i.get("created_at")
+                            .and_then(|v| v.as_str())
+                            .and_then(|created_str| {
+                                chrono::DateTime::parse_from_rfc3339(created_str)
+                                    .ok()
+                                    .and_then(|created| {
+                                        chrono::DateTime::parse_from_rfc3339(resolved_str)
+                                            .ok()
+                                            .map(|resolved| {
+                                                (resolved - created).num_milliseconds()
+                                            })
+                                    })
+                            })
+                    });
+
+                json!({
+                    "id": i["id"],
+                    "agent_name": i["agent_name"],
+                    "incident_type": i["incident_type"],
+                    "severity": severity,
+                    "state": i["state"],
+                    "title": i["description"],
+                    "created_at": i["created_at"],
+                    "resolved_at": i.get("resolved_at"),
+                    "duration_ms": duration_ms,
+                })
+            }).collect();
+            Json(json!({"incidents": incidents}))
+        }
+        Err(e) => Json(json!({"incidents": [], "error": e.to_string()})),
+    }
+}
+
+async fn get_reliability_metrics(
+    State(state): State<Arc<RwLock<AppState>>>,
+) -> Json<Value> {
+    let state = state.read().await;
+    let sec_storage = SecurityStorage::new(state.storage.pool().clone());
+
+    match sec_storage.get_incidents(None).await {
+        Ok(rows) => {
+            // Group incidents by agent_name
+            let mut agent_groups: HashMap<String, Vec<&Value>> = HashMap::new();
+            for row in &rows {
+                let agent = row["agent_name"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                agent_groups.entry(agent).or_default().push(row);
+            }
+
+            let mut metrics_list: Vec<Value> = Vec::new();
+
+            for (agent_name, incidents) in &agent_groups {
+                let total = incidents.len() as u32;
+
+                // Parse timestamps for resolved incidents
+                let mut resolved: Vec<(i64, i64)> = Vec::new(); // (created_epoch_ms, duration_ms)
+                let mut created_timestamps: Vec<i64> = Vec::new();
+
+                for inc in incidents {
+                    let created_ms = inc["created_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_millis());
+
+                    if let Some(created) = created_ms {
+                        created_timestamps.push(created);
+
+                        if let Some(resolved_str) = inc["resolved_at"].as_str() {
+                            if let Some(resolved_dt) =
+                                chrono::DateTime::parse_from_rfc3339(resolved_str).ok()
+                            {
+                                let duration =
+                                    resolved_dt.timestamp_millis() - created;
+                                resolved.push((created, duration.max(0)));
+                            }
+                        }
+                    }
+                }
+
+                // MTTR: mean time to recovery
+                let mttr_ms = if !resolved.is_empty() {
+                    let total_ms: f64 =
+                        resolved.iter().map(|(_, d)| *d as f64).sum();
+                    total_ms / resolved.len() as f64
+                } else {
+                    0.0
+                };
+
+                // MTBF: mean time between failures
+                let mtbf_ms = if created_timestamps.len() >= 2 {
+                    created_timestamps.sort();
+                    let mut intervals = Vec::new();
+                    for i in 1..created_timestamps.len() {
+                        intervals.push(
+                            (created_timestamps[i] - created_timestamps[i - 1]) as f64,
+                        );
+                    }
+                    intervals.iter().sum::<f64>() / intervals.len() as f64
+                } else {
+                    0.0
+                };
+
+                // Availability: (total_time - total_downtime) / total_time * 100
+                let total_downtime_ms: f64 =
+                    resolved.iter().map(|(_, d)| *d as f64).sum();
+                let total_time_ms = if created_timestamps.len() >= 2 {
+                    let min_ts = created_timestamps.iter().min().copied().unwrap_or(0);
+                    let max_ts = created_timestamps.iter().max().copied().unwrap_or(0);
+                    (max_ts - min_ts) as f64
+                } else {
+                    0.0
+                };
+
+                let availability_percent = if total_time_ms > 0.0 {
+                    ((total_time_ms - total_downtime_ms) / total_time_ms * 100.0)
+                        .max(0.0)
+                        .min(100.0)
+                } else {
+                    100.0
+                };
+
+                metrics_list.push(json!({
+                    "agent_name": agent_name,
+                    "mttr_ms": (mttr_ms * 100.0).round() / 100.0,
+                    "mtbf_ms": (mtbf_ms * 100.0).round() / 100.0,
+                    "availability_percent": (availability_percent * 100.0).round() / 100.0,
+                    "total_incidents": total,
+                }));
+            }
+
+            Json(json!({"metrics": metrics_list}))
+        }
+        Err(e) => Json(json!({"metrics": [], "error": e.to_string()})),
+    }
+}
+
+async fn get_dependencies_health(
+    State(state): State<Arc<RwLock<AppState>>>,
+) -> Json<Value> {
+    let state = state.read().await;
+    let pool = state.storage.pool().clone();
+    let mut dependencies: Vec<Value> = Vec::new();
+
+    // Check PostgreSQL — use pool.acquire() to verify connectivity
+    let pg_start = std::time::Instant::now();
+    match pool.acquire().await {
+        Ok(conn) => {
+            let latency_ms = pg_start.elapsed().as_secs_f64() * 1000.0;
+            // Release connection back to pool
+            drop(conn);
+            dependencies.push(json!({
+                "name": "PostgreSQL",
+                "status": "healthy",
+                "latency_ms": (latency_ms * 100.0).round() / 100.0,
+                "uptime_percent": 100.0,
+                "last_check": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+        Err(e) => {
+            dependencies.push(json!({
+                "name": "PostgreSQL",
+                "status": "failed",
+                "latency_ms": null,
+                "uptime_percent": 0.0,
+                "last_check": chrono::Utc::now().to_rfc3339(),
+                "error": e.to_string(),
+            }));
+        }
+    }
+
+    // Check NATS — use TCP port check (async_nats not a dependency of the API)
+    let nats_host = std::env::var("NATS_URL")
+        .unwrap_or_else(|_| "127.0.0.1:4222".to_string())
+        .trim_start_matches("nats://")
+        .to_string();
+    let nats_start = std::time::Instant::now();
+    match tokio::net::TcpStream::connect(&nats_host).await {
+        Ok(_stream) => {
+            let latency_ms = nats_start.elapsed().as_secs_f64() * 1000.0;
+            dependencies.push(json!({
+                "name": "NATS",
+                "status": "healthy",
+                "latency_ms": (latency_ms * 100.0).round() / 100.0,
+                "uptime_percent": 100.0,
+                "last_check": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+        Err(e) => {
+            dependencies.push(json!({
+                "name": "NATS",
+                "status": "failed",
+                "latency_ms": null,
+                "uptime_percent": 0.0,
+                "last_check": chrono::Utc::now().to_rfc3339(),
+                "error": e.to_string(),
+            }));
+        }
+    }
+
+    Json(json!({"dependencies": dependencies}))
 }
 
 // ---------------------------------------------------------------------------
