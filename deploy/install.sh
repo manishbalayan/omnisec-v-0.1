@@ -415,9 +415,103 @@ DOCKER_RUN_ARGS=(
     -d
 )
 
-# On Linux, mount /proc for agent discovery
+# On Linux, mount /proc for agent discovery and create systemd service
 if [ "${OS}" = "Linux" ]; then
     DOCKER_RUN_ARGS+=(-v /proc:/host/proc:ro)
+
+    # Create systemd service file
+    echo ""
+    echo -e "${YELLOW}◆ Setting up systemd service...${NC}"
+
+    cat > /etc/systemd/system/omnisec-daemon.service << EOF
+[Unit]
+Description=OmniSec Daemon - Host-level Process Monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/omnisec-daemon
+Restart=always
+RestartSec=10
+Environment=DATABASE_URL=postgres://omnisec:omnisec@localhost:5432/omnisec
+Environment=NATS_URL=nats://localhost:4222
+Environment=OMNISEC_SAFE_MODE=0
+Environment=OMNISEC_RECOMMENDATION_ONLY=0
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable omnisec-daemon
+    systemctl start omnisec-daemon
+
+    # Wait for daemon to be ready
+    echo ""
+    echo -e "${YELLOW}◆ Waiting for OmniSec Daemon to start...${NC}"
+    TIMEOUT=30
+    ELAPSED=0
+    while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
+        if systemctl is-active --quiet omnisec-daemon; then
+            # Check if daemon is responding on health port
+            if nc -z localhost 3003 2>/dev/null; then
+                echo -e "${GREEN}  ✓ OmniSec Daemon is ready!${NC}"
+                break
+            fi
+        fi
+        sleep 1
+        ELAPSED=$((ELAPSED + 1))
+        echo -n "."
+    done
+    echo ""
+
+    if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
+        echo -e "${YELLOW}  ⚠ Daemon may still be starting... check status: systemctl status omnisec-daemon${NC}"
+    fi
+else
+    echo "  Skipping systemd setup on non-Linux OS"
+fi
+
+# =============================================================================
+# Step 8: Start the container (control plane only)
+# =============================================================================
+echo ""
+echo -e "${YELLOW}◆ Starting OmniSec Control Plane (Dashboard, API, PostgreSQL, NATS)...${NC}"
+
+DOCKER_RUN_ARGS=(
+    --name omnisec
+    -p "127.0.0.1:${DASHBOARD_PORT}:3000"
+    -p "127.0.0.1:${API_PORT}:3002"
+    -p "127.0.0.1:${DAEMON_HEALTH_PORT}:3003"
+    -v omnisec_data:/var/lib/omnisec
+    -p 5432:5432
+    -p 4222:4222
+    --restart unless-stopped
+    --cap-add SYS_PTRACE
+    --cap-add NET_ADMIN
+    --cap-add DAC_READ_SEARCH
+    -e "DASHBOARD_PORT=3000"
+    -e "OMNISEC_DASHBOARD_EXTERNAL_PORT=${DASHBOARD_PORT}"
+    -e "OMNISEC_API_EXTERNAL_PORT=${API_PORT}"
+    -e "OMNISEC_DAEMON_HEALTH_EXTERNAL_PORT=${DAEMON_HEALTH_PORT}"
+    -d
+)
+
+# On Linux, mount /proc for agent discovery (needed by dashboard/API for legacy compatibility)
+if [ "${OS}" = "Linux" ]; then
+    DOCKER_RUN_ARGS+=(-v /proc:/host/proc:ro)
+fi
+
+# Start the container
+if docker run "${DOCKER_RUN_ARGS[@]}" manishbalayan/omnisec:v0.1.0 2>&1; then
+    echo "  ✓ Control plane is starting"
+else
+    echo "  ✗ Failed to start control plane"
+    echo ""
+    echo "  Check Docker logs: docker logs omnisec"
+    exit 1
 fi
 
 # Start the container
