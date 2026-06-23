@@ -83,18 +83,9 @@ jobs:
           docker build \
             -f deploy/Dockerfile.all-in-one \
             -t omnisec/omnisec:ci \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new \
             .
           echo "Image size: $(docker images omnisec/omnisec:ci --format '{{.Size}}')"
           echo "✓ Phase 1 complete"
-
-      - name: Move Docker cache
-        run: |
-          if [ -d /tmp/.buildx-cache-new ]; then
-            rm -rf /tmp/.buildx-cache
-            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-          fi
 
       # =========================================================================
       # Phase 2: Start container & wait for healthy
