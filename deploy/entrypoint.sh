@@ -68,12 +68,17 @@ fi
 # =============================================================================
 # Step 2: Initialize PostgreSQL on first run
 # =============================================================================
+# Ensure socket, data, and logs directories exist with correct ownership
+mkdir -p /var/run/postgresql
+chown postgres:postgres /var/run/postgresql
+mkdir -p "${POSTGRES_DATA}"
+mkdir -p "${OMNISEC_DATA_DIR}/logs"
+chown -R postgres:postgres "${OMNISEC_DATA_DIR}"
+
 if [ ! -f "${POSTGRES_DATA}/PG_VERSION" ]; then
     echo "[omnisec] ◆ Initializing PostgreSQL (first run)..."
-    mkdir -p "${POSTGRES_DATA}"
-    chown -R postgres:postgres "${POSTGRES_DATA}"
 
-    su - postgres -c "${OMNISEC_PGBIN}/initdb -D ${POSTGRES_DATA} --auth=trust --no-instructions" >> "${POSTGRES_LOG}" 2>&1
+    su - postgres -c "${OMNISEC_PGBIN}/initdb -D ${POSTGRES_DATA} --auth=trust --no-instructions >> ${POSTGRES_LOG} 2>&1"
 
     # Configure PostgreSQL
     cat >> "${POSTGRES_DATA}/postgresql.conf" <<-EOCONF
@@ -89,15 +94,11 @@ else
     echo "[omnisec] ✓ PostgreSQL data directory exists"
 fi
 
-# Ensure socket directory
-mkdir -p /var/run/postgresql
-chown postgres:postgres /var/run/postgresql
-
 # =============================================================================
 # Step 3: Start PostgreSQL
 # =============================================================================
 echo "[omnisec] ◆ Starting PostgreSQL..."
-su - postgres -c "${OMNISEC_PGBIN}/pg_ctl start -D ${POSTGRES_DATA} -l ${POSTGRES_LOG} -w" >> "${POSTGRES_LOG}" 2>&1
+su - postgres -c "${OMNISEC_PGBIN}/pg_ctl start -D ${POSTGRES_DATA} -l ${POSTGRES_LOG} -w >> ${POSTGRES_LOG} 2>&1"
 
 # Wait for PostgreSQL
 for i in $(seq 1 30); do
@@ -127,7 +128,7 @@ echo "[omnisec] ✓ Database ready"
 # Step 5: Start NATS
 # =============================================================================
 echo "[omnisec] ◆ Starting NATS..."
-nats-server -js --port 4222 --http_port 8222 --data_dir "${OMNISEC_DATA_DIR}/nats" \
+nats-server -js --port 4222 --http_port 8222 --store_dir "${OMNISEC_DATA_DIR}/nats" \
     >> "${OMNISEC_DATA_DIR}/logs/nats.log" 2>&1 &
 NATS_PID=$!
 

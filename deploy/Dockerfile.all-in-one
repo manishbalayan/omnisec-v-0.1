@@ -13,7 +13,7 @@
 # =============================================================================
 
 # ---- Stage 1: Build Rust binaries ----
-FROM rust:1.91-slim AS rust-builder
+FROM rust:1.91-slim-bookworm AS rust-builder
 
 WORKDIR /app
 
@@ -147,13 +147,19 @@ RUN apt-get update && apt-get install -y \
     procps \
     iproute2 \
     netcat-openbsd \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install NATS Server from official release
-RUN curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.10.21/nats-server-v2.10.21-linux-amd64.tar.gz \
+# Install NATS Server from official release — supports amd64 and arm64
+RUN NATS_ARCH=$(case $(uname -m) in \
+        x86_64) echo "amd64" ;; \
+        aarch64|arm64) echo "arm64" ;; \
+        *) echo "Unsupported arch: $(uname -m)"; exit 1 ;; \
+    esac) && \
+    curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v2.10.21/nats-server-v2.10.21-linux-${NATS_ARCH}.tar.gz" \
     | tar -xz -C /tmp && \
-    mv /tmp/nats-server-v2.10.21-linux-amd64/nats-server /usr/local/bin/ && \
-    rm -rf /tmp/nats-server-v2.10.21-linux-amd64
+    mv "/tmp/nats-server-v2.10.21-linux-${NATS_ARCH}/nats-server" /usr/local/bin/ && \
+    rm -rf "/tmp/nats-server-v2.10.21-linux-${NATS_ARCH}"
 
 # =============================================================================
 # Copy OmniSec binaries from Rust builder
