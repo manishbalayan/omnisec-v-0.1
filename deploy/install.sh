@@ -258,10 +258,90 @@ else
 fi
 
 # =============================================================================
-# Step 7: Start the container
+# Step 7: Install and start OmniSec Daemon on host
 # =============================================================================
 echo ""
-echo -e "${YELLOW}◆ Starting OmniSec...${NC}"
+echo -e "${YELLOW}◆ Installing OmniSec Daemon on host...${NC}"
+
+# Create a temporary directory for building the daemon
+TMP_DAEMON_BUILD=$(mktemp -d)
+if git clone https://github.com/manishbalayan/omnisec-v-0.1.git "$TMP_DAEMON_BUILD" 2>/dev/null; then
+    echo "  Building OmniSec Daemon..."
+    if cd "$TMP_DAEMON_BUILD" && cargo build --release --bin omnisec-daemon; then
+        echo -e "${GREEN}  ✓ Daemon built successfully${NC}"
+        # Install the daemon binary
+        cp "$TMP_DAEMON_BUILD/target/release/omnisec-daemon" /usr/local/bin/
+        chmod +x /usr/local/bin/omnisec-daemon
+        echo -e "${GREEN}  ✓ Daemon installed to /usr/local/bin/omnisec-daemon${NC}"
+        cd -
+    else
+        echo -e "${RED}  ✗ Failed to build daemon${NC}"
+        rm -rf "$TMP_DAEMON_BUILD"
+        exit 1
+    fi
+    rm -rf "$TMP_DAEMON_BUILD"
+else
+    echo -e "${RED}  ✗ Failed to clone repository for daemon build${NC}"
+    exit 1
+fi
+
+# Create systemd service file
+echo ""
+echo -e "${YELLOW}◆ Setting up systemd service...${NC}"
+cat > /etc/systemd/system/omnisec-daemon.service << EOF
+[Unit]
+Description=OmniSec Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/omnisec-daemon
+Restart=always
+RestartSec=10
+Environment=DATABASE_URL=postgres://omnisec:omnisec@localhost:5432/omnisec
+Environment=NATS_URL=nats://localhost:4222
+Environment=OMNISEC_SAFE_MODE=0
+Environment=OMNISEC_RECOMMENDATION_ONLY=0
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start the service
+systemctl daemon-reload
+systemctl enable omnisec-daemon
+systemctl start omnisec-daemon
+
+# Wait for daemon to be ready
+echo ""
+echo -e "${YELLOW}◆ Waiting for OmniSec Daemon to start...${NC}"
+TIMEOUT=30
+ELAPSED=0
+while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
+    if systemctl is-active --quiet omnisec-daemon; then
+        # Additionally check if it's responding on health port
+        if nc -z localhost 3003 2>/dev/null; then
+            echo -e "${GREEN}  ✓ OmniSec Daemon is ready!${NC}"
+            break
+        fi
+    fi
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+    echo -n "."
+done
+echo ""
+
+if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
+    echo -e "${YELLOW}  ⚠ Daemon may still be starting... check status: systemctl status omnisec-daemon${NC}"
+fi
+
+# =============================================================================
+# Step 8: Start the container (control plane only)
+# =============================================================================
+echo ""
+echo -e "${YELLOW}◆ Starting OmniSec Control Plane (Dashboard, API, PostgreSQL, NATS)...${NC}"
 
 DOCKER_RUN_ARGS=(
     --name "${OMNISEC_CONTAINER_NAME}"
@@ -280,16 +360,16 @@ DOCKER_RUN_ARGS=(
     -d
 )
 
-# On Linux, mount /proc for agent discovery
+# On Linux, mount /proc for agent discovery (needed by dashboard/API for legacy compatibility)
 if [ "${OS}" = "Linux" ]; then
     DOCKER_RUN_ARGS+=(-v /proc:/host/proc:ro)
 fi
 
 # Start the container
 if docker run "${DOCKER_RUN_ARGS[@]}" "${OMNISEC_IMAGE}:${OMNISEC_TAG}" 2>&1; then
-    echo -e "${GREEN}  ✓ Container started${NC}"
+    echo -e "${GREEN}  ✓ Control Plane started${NC}"
 else
-    echo -e "${RED}  ✗ Failed to start container${NC}"
+    echo -e "${RED}  ✗ Failed to start Control Plane${NC}"
     echo ""
     echo "  Check Docker logs: docker logs ${OMNISEC_CONTAINER_NAME}"
     exit 1
