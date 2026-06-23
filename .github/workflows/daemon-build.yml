@@ -1,0 +1,130 @@
+# =============================================================================
+# OmniSec Daemon Build Pipeline
+# =============================================================================
+# Builds omnisec-daemon release binaries for linux-amd64 and linux-arm64
+# and publishes to GitHub Releases.
+#
+# Triggers:
+#   - Push to main branch (every push creates/update Release)
+#
+# Output:
+#   - linux-amd64 binary: omnisec-daemon-linux-amd64
+#   - linux-arm64 binary: omnisec-daemon-linux-arm64
+#   - SHA256 checksums for both
+# =============================================================================
+
+name: OmniSec Daemon Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    name: "Build Daemon (${{ matrix.target }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            binary_name: omnisec-daemon-linux-amd64
+          - os: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+            binary_name: omnisec-daemon-linux-arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust (latest stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross toolchain (for arm64)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build daemon binary
+        run: |
+          cd services/daemon
+          cargo build --release --bin omnisec-daemon --target ${{ matrix.target }}
+
+      - name: Stripping binary
+        run: |
+          strip target/${{ matrix.target }}/release/omnisec-daemon
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: target/${{ matrix.target }}/release/omnissec-daemon
+          retention-days: 30
+
+  package:
+    name: "Package and Release"
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd artifacts
+          sha256sum omnisec-daemon-linux-amd64 > omnisec-daemon-linux-amd64.sha256
+          sha256sum omnisec-daemon-linux-arm64 > omnisec-daemon-linux-arm64.sha256
+
+      - name: Display checksums
+        run: |
+          echo "=== AMD64 Checksum ==="
+          cat artifacts/omnisec-daemon-linux-amd64.sha256
+          echo ""
+          echo "=== ARM64 Checksum ==="
+          cat artifacts/omnisec-daemon-linux-arm64.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v0.1.0-daemon-${{ github.sha }}
+          name: OmniSec Daemon Binary Release
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/omnisec-daemon-linux-amd64
+            artifacts/omnisec-daemon-linux-amd64.sha256
+            artifacts/omnisec-daemon-linux-arm64
+            artifacts/omnisec-daemon-linux-arm64.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

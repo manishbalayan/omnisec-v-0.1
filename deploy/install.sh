@@ -2,37 +2,37 @@
 # =============================================================================
 # OmniSec Installer
 # =============================================================================
-# One-command installation: curl -fsSL https://install.omnisec.ai | sh
+# One-command installation: pulls pre-built binaries and sets up services.
 #
 # What it does:
-#   1. Detects the platform (Linux/macOS)
-#   2. Checks for Docker (prompts to install if missing)
-#   3. Pulls the omnisec/omnisec all-in-one image
-#   4. Creates a permanent data volume
-#   5. Starts the container
-#   6. Opens the dashboard in the browser
-#   7. Prints the dashboard URL and API key
+#   1. Detects OS, architecture, and builds
+#   2. Downloads omnisec-daemon binary from GitHub Releases
+#   3. Verifies checksum
+#   4. Installs daemon binary to /usr/local/bin/
+#   5. Creates systemd service
+#   6. Starts Docker control plane stack
+#   7. Prints dashboard URL
+#
+# Prerequisites: curl, Docker
+# No Rust/Cargo/compilation on target machine.
 # =============================================================================
 
 set -e
 
 # =============================================================================
-# Port detection and allocation
+# Configuration
 # =============================================================================
-# OmniSec requires 3 ports: Dashboard (default 3000), API (default 3002),
-# Daemon Health (default 3003). If any are occupied, we auto-allocate free ports.
-#
-# IMPORTANT: Ports are allocated SEQUENTIALLY and tracked in ALLOCATED_PORTS
-# to prevent two services from claiming the same port (since Docker hasn't
-# started yet, port_in_use alone can't detect in-memory allocations).
-# =============================================================================
+REPO_OWNER="${GITHUB_REPO_OWNER:-manishbalayan}"
+REPO_NAME="${GITHUB_REPO_NAME:-omnisec-v-0.1}"
+RELEASE_TAG="${OMNISEC_VERSION:-v0.1.0-daemon}"
+DAEMON_BIN_DIR="${OMNISEC_DAEMON_BIN_DIR:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}"
 
 # Default ports
 DEFAULT_DASHBOARD_PORT=3000
 DEFAULT_API_PORT=3002
 DEFAULT_DAEMON_HEALTH_PORT=3003
 
-# Track in-memory allocated ports to prevent conflicts between sequential checks
+# Track in-memory allocated ports to prevent conflicts
 ALLOCATED_PORTS=""
 
 # Detect if a port is in use (works on Linux and macOS)
@@ -51,8 +51,6 @@ port_in_use() {
 }
 
 # Find the first available port starting from the given port.
-# Checks both actual OS port usage AND previously allocated ports (from
-# earlier find_free_port calls tracked in ALLOCATED_PORTS).
 already_allocated() {
     local port=$1
     local ap
@@ -78,72 +76,81 @@ find_free_port() {
     return 1
 }
 
-OMNISEC_IMAGE="${OMNISEC_IMAGE:-omnisec/omnisec}"
-OMNISEC_TAG="${OMNISEC_TAG:-latest}"
-OMNISEC_CONTAINER_NAME="${OMNISEC_CONTAINER_NAME:-omnisec}"
-OMNISEC_VOLUME_NAME="${OMNISEC_VOLUME_NAME:-omnisec_data}"
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-echo ""
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  OmniSec Reliability v0.1${NC}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-echo ""
-
 # =============================================================================
-# Step 1: Detect platform
+# Platform Detection
 # =============================================================================
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-echo -e "${YELLOW}◆ Detecting platform...${NC}"
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo "  OmniSec Reliability v0.1 - Host-Level Installation"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+
+echo "◆ Platform Detection"
 echo "  OS:   ${OS}"
 echo "  Arch: ${ARCH}"
+echo ""
 
 case "${OS}" in
-    Linux)  ;;
-    Darwin) ;;
+    Linux)
+        ;;
+    Darwin)
+        ;;
     *)
-        echo -e "${RED}✗ Unsupported OS: ${OS}${NC}"
+        echo "✗ Unsupported OS: ${OS}"
         echo "  OmniSec requires Linux or macOS."
         echo "  For other platforms, use Docker: https://docs.docker.com/get-docker/"
         exit 1
         ;;
 esac
 
-# =============================================================================
-# Step 2: Check for Docker
-# =============================================================================
+# Determine architecture for binary download
+case "${ARCH}" in
+    x86_64)
+        BINARY_ARCH="amd64"
+        ;;
+    aarch64|arm64)
+        BINARY_ARCH="arm64"
+        ;;
+    *)
+        echo "✗ Unsupported architecture: ${ARCH}"
+        exit 1
+        ;;
+esac
+
+echo "◆ Architecture Selection"
+echo "  Host architecture: ${ARCH}"
+echo "  Binary architecture: ${BINARY_ARCH}"
 echo ""
-echo -e "${YELLOW}◆ Checking for Docker...${NC}"
+
+# =============================================================================
+# Step 1: Check for Docker
+# =============================================================================
+echo "◆ Checking for Docker"
 
 if command -v docker &>/dev/null; then
     DOCKER_VERSION=$(docker --version 2>/dev/null)
-    echo -e "${GREEN}  ✓ ${DOCKER_VERSION}${NC}"
+    echo "  ✓ ${DOCKER_VERSION}"
 else
-    echo -e "${RED}  ✗ Docker not found${NC}"
+    echo "  ✗ Docker not found"
     echo ""
-    echo "  OmniSec requires Docker to run."
+    echo "  OmniSec requires Docker to run the control plane."
     echo ""
     echo "  Install Docker:"
     echo "    Linux:   curl -fsSL https://get.docker.com | sh"
     echo "    macOS:   https://docs.docker.com/desktop/install/mac-install/"
     echo ""
     echo "  After installing Docker, run this installer again:"
-    echo "    curl -fsSL https://install.omnisec.ai | sh"
+    echo "    curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/deploy/install.sh | sh"
     echo ""
     exit 1
 fi
 
 # Check if Docker daemon is running
 if ! docker info &>/dev/null; then
-    echo -e "${RED}  ✗ Docker daemon is not running${NC}"
+    echo "  ✗ Docker daemon is not running"
     echo ""
     echo "  Start Docker and try again:"
     echo "    Linux:   sudo systemctl start docker"
@@ -152,145 +159,102 @@ if ! docker info &>/dev/null; then
     exit 1
 fi
 
-# =============================================================================
-# Step 3: Stop existing container
-# =============================================================================
+echo "  ✓ Docker is running"
 echo ""
-echo -e "${YELLOW}◆ Checking for existing installation...${NC}"
 
-if docker ps -a --format '{{.Names}}' | grep -q "^${OMNISEC_CONTAINER_NAME}$"; then
-    echo -e "${YELLOW}  Existing container found. Stopping and removing...${NC}"
-    docker stop "${OMNISEC_CONTAINER_NAME}" > /dev/null 2>&1 || true
-    docker rm "${OMNISEC_CONTAINER_NAME}" > /dev/null 2>&1 || true
-    echo -e "${GREEN}  ✓ Removed existing container${NC}"
+# =============================================================================
+# Step 2: Stop existing installation
+# =============================================================================
+echo "◆ Checking for existing installation"
+
+if docker ps -a --format '{{.Names}}' | grep -q "^omnisec$"; then
+    echo "  Existing container found. Stopping and removing..."
+    docker stop omnisec > /dev/null 2>&1 || true
+    docker rm omnisec > /dev/null 2>&1 || true
+    echo "  ✓ Removed existing container"
 fi
 
-# =============================================================================
-# Step 4: Pull the image (or build from source if not available)
-# =============================================================================
 echo ""
-echo -e "${YELLOW}◆ Checking for OmniSec image...${NC}"
-echo "  Image: ${OMNISEC_IMAGE}:${OMNISEC_TAG}"
 
-# Try to pull the image first
-if docker pull "${OMNISEC_IMAGE}:${OMNISEC_TAG}" 2>/dev/null; then
-    echo -e "${GREEN}  ✓ Image pulled${NC}"
-    IMAGE_TO_USE="${OMNISEC_IMAGE}:${OMNISEC_TAG}"
-else
-    echo -e "${YELLOW}  ⚠ Image not found on Docker Hub, building from source...${NC}"
-    # Create a temporary directory for building
-    TMP_BUILD_DIR=$(mktemp -d)
-    if git clone https://github.com/manishbalayan/omnisec-v-0.1.git "$TMP_BUILD_DIR" 2>/dev/null; then
-        echo "  Cloned repository, building image..."
-        if cd "$TMP_BUILD_DIR" && docker build -f deploy/Dockerfile.all-in-one -t omnisec/omnisec .; then
-            echo -e "${GREEN}  ✓ Image built successfully${NC}"
-            IMAGE_TO_USE="omnisec/omnisec"
-            cd -
-        else
-            echo -e "${RED}  ✗ Failed to build image${NC}"
-            rm -rf "$TMP_BUILD_DIR"
-            exit 1
-        fi
-        rm -rf "$TMP_BUILD_DIR"
+# =============================================================================
+# Step 3: Download omnisec-daemon binary
+# =============================================================================
+echo "◆ Downloading omnisec-daemon binary"
+
+BINARY_NAME="omnisec-daemon-linux-${BINARY_ARCH}"
+BINARY_URL="${DAEMON_BIN_DIR}/${BINARY_NAME}"
+
+if curl -fsSL "${BINARY_URL}" -o /tmp/omnisec-daemon 2>/dev/null; then
+    if [ -f /tmp/omnisec-daemon ]; then
+        echo "  Downloaded: ${BINARY_NAME}"
     else
-        echo -e "${RED}  ✗ Failed to clone repository for building${NC}"
+        echo "  ✗ Download failed: Binary not found at ${BINARY_URL}"
         exit 1
     fi
-fi
-
-# =============================================================================
-# Step 5: Create data volume
-# =============================================================================
-echo ""
-echo -e "${YELLOW}◆ Setting up data persistence...${NC}"
-
-if ! docker volume inspect "${OMNISEC_VOLUME_NAME}" &>/dev/null; then
-    docker volume create "${OMNISEC_VOLUME_NAME}" > /dev/null
-    echo -e "${GREEN}  ✓ Created volume: ${OMNISEC_VOLUME_NAME}${NC}"
 else
-    echo -e "${GREEN}  ✓ Using existing volume: ${OMNISEC_VOLUME_NAME}${NC}"
-fi
-
-# =============================================================================
-# Step 6: Detect available ports
-# =============================================================================
-echo ""
-echo -e "${YELLOW}◆ Checking port availability...${NC}"
-
-DASHBOARD_PORT=$DEFAULT_DASHBOARD_PORT
-API_PORT=$DEFAULT_API_PORT
-DAEMON_HEALTH_PORT=$DEFAULT_DAEMON_HEALTH_PORT
-
-if port_in_use $DASHBOARD_PORT; then
-    NEW_PORT=$(find_free_port $((DASHBOARD_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        echo -e "${RED}  ✗ Cannot find free port for Dashboard${NC}"
-        exit 1
-    fi
-    echo -e "${YELLOW}  ⚠ Port $DASHBOARD_PORT occupied → Dashboard will use port $NEW_PORT${NC}"
-    DASHBOARD_PORT=$NEW_PORT
-else
-    echo -e "${GREEN}  ✓ Dashboard port $DASHBOARD_PORT available${NC}"
-fi
-
-if port_in_use $API_PORT; then
-    NEW_PORT=$(find_free_port $((API_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        echo -e "${RED}  ✗ Cannot find free port for API${NC}"
-        exit 1
-    fi
-    echo -e "${YELLOW}  ⚠ Port $API_PORT occupied → API will use port $NEW_PORT${NC}"
-    API_PORT=$NEW_PORT
-else
-    echo -e "${GREEN}  ✓ API port $API_PORT available${NC}"
-fi
-
-if port_in_use $DAEMON_HEALTH_PORT; then
-    NEW_PORT=$(find_free_port $((DAEMON_HEALTH_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        echo -e "${RED}  ✗ Cannot find free port for Daemon Health${NC}"
-        exit 1
-    fi
-    echo -e "${YELLOW}  ⚠ Port $DAEMON_HEALTH_PORT occupied → Daemon Health will use port $NEW_PORT${NC}"
-    DAEMON_HEALTH_PORT=$NEW_PORT
-else
-    echo -e "${GREEN}  ✓ Daemon Health port $DAEMON_HEALTH_PORT available${NC}"
-fi
-
-# =============================================================================
-# Step 7: Install and start OmniSec Daemon on host
-# =============================================================================
-echo ""
-echo -e "${YELLOW}◆ Installing OmniSec Daemon on host...${NC}"
-
-# Create a temporary directory for building the daemon
-TMP_DAEMON_BUILD=$(mktemp -d)
-if git clone https://github.com/manishbalayan/omnisec-v-0.1.git "$TMP_DAEMON_BUILD" 2>/dev/null; then
-    echo "  Building OmniSec Daemon..."
-    if cd "$TMP_DAEMON_BUILD" && cargo build --release --bin omnisec-daemon; then
-        echo -e "${GREEN}  ✓ Daemon built successfully${NC}"
-        # Install the daemon binary
-        cp "$TMP_DAEMON_BUILD/target/release/omnisec-daemon" /usr/local/bin/
-        chmod +x /usr/local/bin/omnisec-daemon
-        echo -e "${GREEN}  ✓ Daemon installed to /usr/local/bin/omnisec-daemon${NC}"
-        cd -
-    else
-        echo -e "${RED}  ✗ Failed to build daemon${NC}"
-        rm -rf "$TMP_DAEMON_BUILD"
-        exit 1
-    fi
-    rm -rf "$TMP_DAEMON_BUILD"
-else
-    echo -e "${RED}  ✗ Failed to clone repository for daemon build${NC}"
+    echo "  ✗ Failed to download alues from ${BINARY_URL}"
+    echo ""
+    echo "  Check:"
+    echo "    - Network connectivity"
+    echo "    - Release ${RELEASE_TAG} exists at ${DAEMON_BIN_DIR}"
+    echo ""
     exit 1
 fi
 
-# Create systemd service file
+# ============================================================================
+# Step 4: Download and verify SHA256 checksum
+# ============================================================================
 echo ""
-echo -e "${YELLOW}◆ Setting up systemd service...${NC}"
+echo "◆ Verifying binary checksum"
+
+CHECKSUM_FILE="${BINARY_NAME}.sha256"
+CHECKSUM_URL="${DAEMON_BIN_DIR}/${CHECKSUM_FILE}"
+
+if curl -fsSL "${CHECKSUM_URL}" -o /tmp/${CHECKSUM_FILE} 2>/dev/null; then
+    echo "  Downloaded: ${CHECKSUM_FILE}"
+else
+    echo "  ✗ Failed to download checksum file"
+    exit 1
+fi
+
+# Extract the checksum and verify
+ACTUAL_CHECKSUM=$(sha256sum /tmp/omnisec-daemon | awk '{print $1}')
+STATED_CHECKSUM=$(grep ${BINARY_NAME} /tmp/${CHECKSUM_FILE} | awk '{print $1}')
+
+if [ "$ACTUAL_CHECKSUM" = "$STATED_CHECKSUM" ]; then
+    echo "  ✓ Checksum verified: $ACTUAL_CHECKSUM"
+else
+    echo "  ✗ Checksum mismatch!"
+    echo "    Expected: $STATED_CHECKSUM"
+    echo "    Actual:   $ACTUAL_CHECKSUM"
+    exit 1
+fi
+
+echo ""
+
+# =============================================================================
+# Step 5: Install daemon binary
+# =============================================================================
+echo "◆ Installing omnisec-daemon"
+
+chmod +x /tmp/omnisec-daemon
+if mv /tmp/omnisec-daemon /usr/local/bin/; then
+    echo "  Installed to /usr/local/bin/omnisec-daemon"
+else
+    echo "  ✗ Failed to install daemon binary"
+    exit 1
+fi
+
+echo ""
+
+# =============================================================================
+# Step 6: Create systemd service
+# ============================================================================
+echo "◆ Setting up systemd service"
+
 cat > /etc/systemd/system/omnisec-daemon.service << EOF
 [Unit]
-Description=OmniSec Daemon
+Description=OmniSec Daemon - Host-level Process Monitoring
 After=network-online.target
 Wants=network-online.target
 
@@ -309,21 +273,42 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 EOF
 
-# Enable and start the service
 systemctl daemon-reload
-systemctl enable omnisec-daemon
-systemctl start omnisec-daemon
+
+echo "  ✓ Systemd service created"
+echo ""
+
+# =============================================================================
+# Step 7: Start daemon
+# ============================================================================
+echo "◆ Starting omnisec-daemon service"
+
+if systemctl enable omnisec-daemon; then
+    echo "  ✓ Daemon enabled for auto-start"
+else
+    echo "  ✗ Failed to enable daemon service"
+    exit 1
+fi
+
+if systemctl start omnisec-daemon; then
+    echo "  ✓ Daemon started"
+else
+    echo "  ✗ Failed to start daemon service"
+    echo ""
+    echo "  Check logs: systemctl status omnisec-daemon"
+    exit 1
+fi
 
 # Wait for daemon to be ready
 echo ""
-echo -e "${YELLOW}◆ Waiting for OmniSec Daemon to start...${NC}"
+echo "◆ Waiting for daemon to be ready..."
 TIMEOUT=30
 ELAPSED=0
 while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
     if systemctl is-active --quiet omnisec-daemon; then
-        # Additionally check if it's responding on health port
+        # Check if daemon is responding on health port
         if nc -z localhost 3003 2>/dev/null; then
-            echo -e "${GREEN}  ✓ OmniSec Daemon is ready!${NC}"
+            echo "  ✓ OmniSec Daemon is ready!"
             break
         fi
     fi
@@ -334,21 +319,91 @@ done
 echo ""
 
 if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
-    echo -e "${YELLOW}  ⚠ Daemon may still be starting... check status: systemctl status omnisec-daemon${NC}"
+    echo "  ⚠ Daemon may still be starting..."
+    echo ""
+    echo "  Check logs: systemctl status omnisec-daemon"
 fi
 
-# =============================================================================
-# Step 8: Start the container (control plane only)
-# =============================================================================
 echo ""
-echo -e "${YELLOW}◆ Starting OmniSec Control Plane (Dashboard, API, PostgreSQL, NATS)...${NC}"
+
+# =============================================================================
+# Step 8: Pull Docker image
+# ============================================================================
+echo "◆ Pulling OmniSec Docker image"
+
+if docker pull manishbalayan/omnisec:v0.1.0 2>&1; then
+    echo "  ✓ Docker image pulled"
+else
+    echo "  ✗ Failed to pull Docker image"
+    echo ""
+    echo "  Try:"
+    echo "    docker pull manishbalayan/omnisec:v0.1.0"
+    echo ""
+    exit 1
+fi
+
+echo ""
+
+# =============================================================================
+# Step 9: Detect available ports
+# ============================================================================
+echo "◆ Checking port availability"
+
+DASHBOARD_PORT=$DEFAULT_DASHBOARD_PORT
+API_PORT=$DEFAULT_API_PORT
+DAEMON_HEALTH_PORT=$DEFAULT_DAEMON_HEALTH_PORT
+
+if port_in_use $DASHBOARD_PORT; then
+    NEW_PORT=$(find_free_port $((DASHBOARD_PORT + 1)))
+    if [ -z "$NEW_PORT" ]; then
+        echo "  ✗ Cannot find free port for Dashboard"
+        exit 1
+    fi
+    echo "  ⚠ Port $DASHBOARD_PORT occupied → Dashboard will use port $NEW_PORT"
+    DASHBOARD_PORT=$NEW_PORT
+else
+    echo "  ✓ Dashboard port $DASHBOARD_PORT available"
+fi
+
+if port_in_use $API_PORT; then
+    NEW_PORT=$(find_free_port $((API_PORT + 1)))
+    if [ -z "$NEW_PORT" ]; then
+        echo "  ✗ Cannot find free port for API"
+        exit 1
+    fi
+    echo "  ⚠ Port $API_PORT occupied → API will use port $NEW_PORT"
+    API_PORT=$NEW_PORT
+else
+    echo "  ✓ API port $API_PORT available"
+fi
+
+if port_in_use $DAEMON_HEALTH_PORT; then
+    NEW_PORT=$(find_free_port $((DAEMON_HEALTH_PORT + 1)))
+    if [ -z "$NEW_PORT" ]; then
+        echo "  ✗ Cannot find free port for Daemon Health"
+        exit 1
+    fi
+    echo "  ⚠ Port $DAEMON_HEALTH_PORT occupied → Daemon Health will use port $NEW_PORT"
+    DAEMON_HEALTH_PORT=$NEW_PORT
+else
+    echo "  ✓ Daemon Health port $DAEMON_HEALTH_PORT available"
+fi
+
+echo ""
+
+# =============================================================================
+# Step 10: Start Docker control plane
+# ============================================================================
+echo "◆ Starting OmniSec Control Plane"
 
 DOCKER_RUN_ARGS=(
-    --name "${OMNISEC_CONTAINER_NAME}"
+    --name omnisec
     -p "127.0.0.1:${DASHBOARD_PORT}:3000"
     -p "127.0.0.1:${API_PORT}:3002"
     -p "127.0.0.1:${DAEMON_HEALTH_PORT}:3003"
-    -v "${OMNISEC_VOLUME_NAME}:/var/lib/omnisec"
+    -v omnisec_data:/var/lib/omnisec
+    -p 5432:5432
+    -p 4222:4222
     --restart unless-stopped
     --cap-add SYS_PTRACE
     --cap-add NET_ADMIN
@@ -360,33 +415,30 @@ DOCKER_RUN_ARGS=(
     -d
 )
 
-# On Linux, mount /proc for agent discovery (needed by dashboard/API for legacy compatibility)
+# On Linux, mount /proc for agent discovery
 if [ "${OS}" = "Linux" ]; then
     DOCKER_RUN_ARGS+=(-v /proc:/host/proc:ro)
 fi
 
 # Start the container
-if docker run "${DOCKER_RUN_ARGS[@]}" "${OMNISEC_IMAGE}:${OMNISEC_TAG}" 2>&1; then
-    echo -e "${GREEN}  ✓ Control Plane started${NC}"
+if docker run "${DOCKER_RUN_ARGS[@]}" manishbalayan/omnisec:v0.1.0 2>&1; then
+    echo "  ✓ Control plane is starting"
 else
-    echo -e "${RED}  ✗ Failed to start Control Plane${NC}"
+    echo "  ✗ Failed to start control plane"
     echo ""
-    echo "  Check Docker logs: docker logs ${OMNISEC_CONTAINER_NAME}"
+    echo "  Check Docker logs: docker logs omnisec"
     exit 1
 fi
 
-# =============================================================================
-# Step 8: Wait for container to be healthy
-# =============================================================================
+# Wait for Docker stack to be healthy
 echo ""
-echo -e "${YELLOW}◆ Waiting for OmniSec to start...${NC}"
-
-TIMEOUT=90
+echo "◆ Waiting for OmniSec to be fully healthy..."
+TIMEOUT=120
 ELAPSED=0
 while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
-    HEALTH=$(docker inspect --format='{{.State.Health.Status}}' "${OMNISEC_CONTAINER_NAME}" 2>/dev/null || echo "starting")
+    HEALTH=$(docker inspect --format='{{.State.Health.Status}}' omnisec 2>/dev/null || echo "starting")
     if [ "${HEALTH}" = "healthy" ]; then
-        echo -e "${GREEN}  ✓ OmniSec is ready!${NC}"
+        echo "  ✓ OmniSec is ready!"
         break
     fi
     sleep 2
@@ -396,40 +448,50 @@ done
 echo ""
 
 if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
-    echo -e "${YELLOW}  ⚠ Still starting... check logs: docker logs ${OMNISEC_CONTAINER_NAME}${NC}"
+    echo "  ⚠ Still starting..."
+    echo ""
+    echo "  Check logs: docker logs omnisec"
 fi
 
-# =============================================================================
-# Step 9: Get API key from container
-# =============================================================================
-API_KEY=$(docker exec "${OMNISEC_CONTAINER_NAME}" cat /var/lib/omnisec/.api_key 2>/dev/null || echo "See container logs")
+echo ""
 
 # =============================================================================
-# Step 10: Open dashboard
+# Step 11: Get API key
+# ============================================================================
+API_KEY=$(docker exec omnisec cat /var/lib/omnisec/.api_key 2>/dev/null || echo "See container logs")
+
 # =============================================================================
-API_URL="http://localhost:${API_PORT}"
+# Step 12: Display summary
+# ============================================================================
+echo "═══════════════════════════════════════════════════════════════"
+echo "  OmniSec is running!"
 echo ""
-echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  OmniSec is running!${NC}"
+echo "  Daemon Service:"
+echo "    Status: $(systemctl is-active omnisec-daemon)"
+echo "    Binary: /usr/local/bin/omnisec-daemon"
+echo "    Config: /etc/systemd/system/omnisec-daemon.service"
 echo ""
-echo -e "  Dashboard:  ${BLUE}http://localhost:${DASHBOARD_PORT}${NC}"
-echo -e "  API:        ${BLUE}${API_URL}${NC}"
-echo -e "  Daemon Health: ${BLUE}http://localhost:${DAEMON_HEALTH_PORT}/health${NC}"
-echo -e "  API Key:    ${YELLOW}${API_KEY}${NC}"
+echo "  Control Plane:"
+echo "    Container: omnisec"
+echo "    Dashboard: http://localhost:${DASHBOARD_PORT}"
+echo "    API:        http://localhost:${API_PORT}"
+echo "    API Key:    ${API_KEY}"
 echo ""
-echo -e "  Commands:"
-echo -e "    View logs:     ${BLUE}docker logs -f ${OMNISEC_CONTAINER_NAME}${NC}"
-echo -e "    Stop:          ${BLUE}docker stop ${OMNISEC_CONTAINER_NAME}${NC}"
-echo -e "    Start:         ${BLUE}docker start ${OMNISEC_CONTAINER_NAME}${NC}"
-echo -e "    Remove:        ${BLUE}docker rm -f ${OMNISEC_CONTAINER_NAME}${NC}"
+echo "  Services:"
+echo "    PostgreSQL: localhost:5432 (omnisec database)"
+echo "    NATS:       localhost:4222 (JetStream enabled)"
 echo ""
-echo -e "  Upgrade:"
-echo -e "    ${BLUE}docker pull ${OMNISEC_IMAGE}:${OMNISEC_TAG}${NC}"
-echo -e "    ${BLUE}docker stop ${OMNISEC_CONTAINER_NAME} && docker rm ${OMNISEC_CONTAINER_NAME}${NC}"
-echo -e "    Then re-run this installer."
+echo "  Commands:"
+echo "    View daemon logs:      journalctl -u omnisec-daemon -f"
+echo "    View control plane:    docker logs -f omnisec"
+echo "    Stop daemon:           systemctl stop omnisec-daemon"
+echo "    Start daemon:          systemctl start omnisec-daemon"
+echo "    Stop control plane:    docker stop omnisec"
+echo "    Start control plane:   docker start omnisec"
+echo "    Remove all:            sudo bash -c 'systemctl stop omnisec-daemon && docker stop omnisec && docker rm omnisec'"
 echo ""
-echo -e "  Visit ${BLUE}https://omnisec.ai/docs${NC} for documentation."
-echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+echo "  Visit https://github.com/${REPO_OWNER}/${REPO_NAME} for documentation"
+echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
 # Try to open the dashboard in the browser
@@ -437,9 +499,12 @@ case "${OS}" in
     Linux)
         if command -v xdg-open &>/dev/null; then
             xdg-open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+        elif command -v goat &>/dev/null; then
+            goat "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
         fi
         ;;
     Darwin)
         open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
         ;;
 esac
+echo ""
