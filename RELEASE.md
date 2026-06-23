@@ -56,7 +56,7 @@
 - **Design Partner Mode** — `OMNISEC_SAFE_MODE=1`: logs all enforcement, applies none; `OMNISEC_RECOMMENDATION_ONLY=1`: decision engine runs, no kernel actions; `OMNISEC_VERBOSE=1`: extended logging
 - **Dashboard** — Next.js 14 with 4 pages: overview, security, reliability, enforcement
 - **API** — Axum 0.7; 28 endpoints; static API key authentication
-- **Docker Compose** — Full stack: PostgreSQL 16, Redis 7, NATS 2, API, Daemon, Proxy, Policy Engine, Dashboard
+- **All-in-One Deployment** — Single container: PostgreSQL 16, NATS 2, API, Daemon, Dashboard
 
 ### Alerting
 - **Telegram** — Real Telegram Bot API integration with HTML parse mode
@@ -75,7 +75,7 @@
 | **No Billing / Licensing** | No payment infrastructure | Manual invoicing |
 | **Stateless Daemon** | Restart wipes all baselines, fingerprints, enforcement state | Minimize daemon restarts; monitor uptime |
 | **eBPF Not Compiled** | Falls back to `/proc` polling (1s resolution, no syscall-level data) | Accept `/proc` fallback; plan Linux CI build |
-| **Dockerfile Missing nftables** | `nft` command not available in daemon container | Add `nftables` to apt install list before enforcement testing |
+| **nftables Not Bundled** | `nft` command needed for enforcement but not included | Add `nftables` to apt install list in Dockerfile.all-in-one if enforcement is tested |
 | **Hardcoded Known Destinations** | 7 entries only; any other AI API produces false positives | Run in SAFE_MODE during baseline period |
 | **No cgroup Verification** | CPU/memory limits written but success not confirmed | Monitor `/sys/fs/cgroup` manually |
 | **Email Alerts Stub** | Email channel logs but does not send | Use Telegram or Slack |
@@ -89,15 +89,23 @@
 
 ### Minimum Requirements
 - Linux kernel ≥ 5.4 (for inotify + nftables support)
-- Docker + Docker Compose
+- Docker
 - Capabilities: `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`
-- PostgreSQL 16, Redis 7, NATS 2 (provided by docker-compose)
+- PostgreSQL 16, NATS 2 (bundled in all-in-one image)
 
 ### Quick Start (Design Partner)
 ```bash
-cp .env.example .env
-# Edit .env: set OMNISEC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-docker compose -f infra/docker/docker-compose.yml up -d
+curl -fsSL https://install.omnisec.ai | sh
+```
+
+Or run directly:
+```bash
+docker run -d --name omnisec \
+  -p 3000:3000 \
+  -v omnisec_data:/var/lib/omnisec \
+  --restart unless-stopped \
+  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add DAC_READ_SEARCH \
+  omnisec/omnisec
 ```
 
 ### Recommended Initial Config (Safe Mode)

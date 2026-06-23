@@ -1684,26 +1684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnisec-e2e"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "bytes",
- "chrono",
- "futures",
- "omnisec-chaos",
- "omnisec-events",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "omnisec-ebpf"
 version = "0.1.0"
 dependencies = [

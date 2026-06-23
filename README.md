@@ -8,25 +8,45 @@ Omnisec sits below AI agents and their harnesses at the operating system and net
 
 ## Architecture
 
-- **Sensor**: eBPF-based process and network monitoring
-- **Daemon**: Core orchestration service
+- **Daemon**: Core orchestration service — agent discovery, health monitoring, hang/crash detection, automatic restart
 - **API**: REST API for dashboard and management
-- **Proxy**: Transparent proxy for AI model requests
-- **Policy Engine**: YAML-driven policy enforcement
 - **Dashboard**: Next.js web interface
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Rust toolchain (for development)
+- Docker
+
+### Installation
+
+```bash
+curl -fsSL https://install.omnisec.ai | sh
+```
+
+This will pull the all-in-one image, create a persistent data volume, and start all services automatically.
+
+### Or run directly
+
+```bash
+docker run -d \
+  --name omnisec \
+  -p 3000:3000 \
+  -v omnisec_data:/var/lib/omnisec \
+  --restart unless-stopped \
+  --cap-add SYS_PTRACE \
+  --cap-add NET_ADMIN \
+  --cap-add DAC_READ_SEARCH \
+  omnisec/omnisec
+```
+
+Then open **http://localhost:3000** in your browser.
 
 ### Development
 
 ```bash
-# Start infrastructure
-docker-compose -f infra/docker/docker-compose.yml up -d
+# Start infrastructure (PostgreSQL, NATS)
+docker compose -f tests/integration/docker-compose.test.yml up -d postgres nats
 
 # Run API server
 cargo run --bin omnisec-api
@@ -38,18 +58,11 @@ cargo run --bin omnisec-daemon
 cd apps/dashboard && npm install && npm run dev
 ```
 
-### Production
-
-```bash
-docker-compose -f infra/docker/docker-compose.yml up --build
-```
-
 ## Configuration
 
 Environment variables:
 
 - `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string
 - `NATS_URL`: NATS connection string
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token for alerts
 - `TELEGRAM_CHAT_ID`: Telegram chat ID for alerts

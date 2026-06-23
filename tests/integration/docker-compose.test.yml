@@ -30,45 +30,25 @@ services:
       - "8223:8222"
     command: ["-js"]
 
-  api:
+  omnisec:
     build:
       context: .
-      dockerfile: apps/api/Dockerfile
-    ports:
-      - "3003:3000"
+      dockerfile: deploy/Dockerfile.all-in-one
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/omnisec_test
-      REDIS_URL: redis://redis:6379
-      NATS_URL: nats://nats:4222
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  daemon:
-    build:
-      context: .
-      dockerfile: services/daemon/Dockerfile
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/omnisec_test
-      REDIS_URL: redis://redis:6379
       NATS_URL: nats://nats:4222
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /proc:/host/proc:ro
+    ports:
+      - "3000:3000"
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
+      - DAC_READ_SEARCH
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_started
       redis:
         condition: service_healthy
-
-  chaos-agent:
-    build:
-      context: .
-      dockerfile: crates/chaos/Dockerfile
-    command: ["--healthy-loop", "--interval-secs", "1"]
-    depends_on:
-      - daemon

@@ -136,17 +136,11 @@ Skipped:   0
 | omnisec-runtime | 4 | PASS |
 | omnisec-security | 17 | PASS |
 | omnisec-proxy (cost) | 4 | PASS |
-| e2e beta_audit | 3 | PASS |
-| e2e pmf | 6 | PASS |
+
 | **Total** | **95** | **ALL PASS** |
 
-**E2E / integration tests (not run — require live infrastructure):**
-- `tests/e2e/tests/reliability.rs` — R1–R6 (all `#[ignore]`)
-- `tests/e2e/tests/security.rs` — S1–S6 (all `#[ignore]`)
-- `tests/e2e/tests/runtime_control.rs` — RC1–RC5 (all `#[ignore]`)
-- `tests/e2e/tests/false_positive.rs` — FP1–FP4 (all `#[ignore]`)
-- `tests/e2e/tests/performance.rs` — P1–P4 (all `#[ignore]`)
-- `tests/e2e/tests/red_team.rs` — RT1–RT7 (all `#[ignore]`)
+**Integration tests (not run — require live infrastructure):**
+- `tests/integration/` — control_loop, scenarios (require PostgreSQL + NATS)
 
 ---
 

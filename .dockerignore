@@ -11,13 +11,11 @@ node_modules/
 apps/dashboard/node_modules/
 
 # Tests
-tests/
 **/*.test.rs
 **/*.test.ts
 **/*.test.tsx
 **/*.spec.ts
 **/*.spec.tsx
-**/tests/
 **/test_*
 
 # Documentation

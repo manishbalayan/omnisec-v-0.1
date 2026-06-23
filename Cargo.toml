@@ -28,7 +28,6 @@ members = [
     "services/doctor",
     "services/support-bundle",
     "apps/api",
-    "tests/e2e",
 ]
 resolver = "2"
 

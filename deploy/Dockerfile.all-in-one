@@ -51,7 +51,6 @@ COPY services/daemon/Cargo.toml services/daemon/
 COPY apps/api/Cargo.toml apps/api/
 COPY services/doctor/Cargo.toml services/doctor/
 COPY services/support-bundle/Cargo.toml services/support-bundle/
-COPY tests/e2e/Cargo.toml tests/e2e/
 
 RUN mkdir -p \
     crates/events/src \
@@ -80,7 +79,6 @@ RUN mkdir -p \
     apps/api/src \
     services/doctor/src \
     services/support-bundle/src \
-    tests/e2e/src \
     crates/storage/migrations
 
 # Create placeholder source files for dependency resolution
