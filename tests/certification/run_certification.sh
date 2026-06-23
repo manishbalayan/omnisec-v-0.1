@@ -50,7 +50,7 @@ verify_infrastructure() {
     fi
 
     # Check required containers
-    for svc in omnisec-postgres-1 omnisec-redis-1 omnisec-nats-1; do
+    for svc in omnisec-postgres-1 omnisec-nats-1; do
         if docker ps --format '{{.Names}}' | grep -q "$svc"; then
             pass "Container $svc is running"
         else
@@ -67,13 +67,11 @@ verify_infrastructure() {
         fi
     fi
 
-    # Check API
-    if curl -sf http://localhost:3000/health &>/dev/null; then
-        pass "API /health endpoint responding"
-    elif curl -sf http://localhost:3000/ &>/dev/null; then
-        pass "API root endpoint responding"
+    # Check API (internal health endpoint on port 3002)
+    if curl -sf http://localhost:3002/health &>/dev/null; then
+        pass "API /health endpoint responding on port 3002"
     else
-        fail "API not reachable on port 3000"
+        fail "API not reachable on port 3002"
     fi
 }
 
@@ -247,23 +245,7 @@ run_crash_loop_tests() {
 run_dependency_tests() {
     header "GATE 6: Dependency Failure Tests"
 
-    # Test 1: Redis outage and recovery
-    log "Testing Redis outage..."
-    nats sub omnisec.dependency.recovered --server nats://localhost:4222 --count=1 --timeout=60 &>/tmp/dep_redis_$$.txt &
-    local sub_pid=$!
-    docker stop omnisec-redis-1 2>/dev/null
-    sleep 10
-    docker start omnisec-redis-1 2>/dev/null
-
-    wait "$sub_pid" 2>/dev/null && {
-        pass "Redis failure: dependency recovery event received"
-    } || {
-        warn "Redis failure: no dependency recovery event"
-    }
-
-    sleep 5
-
-    # Test 2: PostgreSQL outage and recovery
+    # Test 1: PostgreSQL outage and recovery
     log "Testing PostgreSQL outage..."
     nats sub omnisec.dependency.failure --server nats://localhost:4222 --count=1 --timeout=30 &>/tmp/dep_pg_$$.txt &
     local sub_pid=$!
@@ -288,7 +270,7 @@ run_dependency_tests() {
         sleep 2
     done
 
-    # Test 3: NATS outage and recovery
+    # Test 2: NATS outage and recovery
     log "Testing NATS outage..."
     docker stop omnisec-nats-1 2>/dev/null
     sleep 5

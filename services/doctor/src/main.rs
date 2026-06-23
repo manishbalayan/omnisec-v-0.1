@@ -8,7 +8,6 @@
 //   omnisec-doctor --json             # machine-readable output
 //   omnisec-doctor --fix              # print fix commands (doesn't run them)
 
-use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
@@ -67,7 +66,6 @@ async fn main() {
 
     // Run all checks
     results.push(check_postgres().await);
-    results.push(check_redis().await);
     results.push(check_nats().await);
     results.push(check_nftables());
     results.push(check_systemd());
@@ -158,7 +156,7 @@ async fn check_postgres() -> CheckResult {
 
     // Extract host:port from the URL
     let addr = extract_host_port(&url, 5432);
-    match tcp_probe(&addr, Duration::from_secs(3)) {
+    match tcp_probe(&addr, Duration::from_secs(3)).await {
         Ok(_) => CheckResult::pass("postgres", &format!("reachable at {}", addr)),
         Err(e) => CheckResult::fail(
             "postgres",
@@ -168,25 +166,11 @@ async fn check_postgres() -> CheckResult {
     }
 }
 
-async fn check_redis() -> CheckResult {
-    let url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
-    let addr = extract_host_port(&url, 6379);
-    match tcp_probe(&addr, Duration::from_secs(3)) {
-        Ok(_) => CheckResult::pass("redis", &format!("reachable at {}", addr)),
-        Err(e) => CheckResult::fail(
-            "redis",
-            &format!("cannot connect to {}: {}", addr, e),
-            "docker compose up -d redis  OR  systemctl start redis",
-        ),
-    }
-}
-
 async fn check_nats() -> CheckResult {
     let url = std::env::var("NATS_URL")
         .unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let addr = extract_host_port(&url, 4222);
-    match tcp_probe(&addr, Duration::from_secs(3)) {
+    match tcp_probe(&addr, Duration::from_secs(3)).await {
         Ok(_) => CheckResult::pass("nats", &format!("reachable at {}", addr)),
         Err(e) => CheckResult::fail(
             "nats",
@@ -433,7 +417,6 @@ fn check_disk_space() -> CheckResult {
 fn check_env_vars() -> CheckResult {
     let required = [
         ("DATABASE_URL", "Postgres connection string"),
-        ("REDIS_URL", "Redis connection string"),
         ("NATS_URL", "NATS connection string"),
     ];
     let optional = [
@@ -476,7 +459,7 @@ fn check_env_vars() -> CheckResult {
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 fn extract_host_port(url: &str, default_port: u16) -> String {
-    // Strip scheme (postgres://, redis://, nats://)
+    // Strip scheme (postgres://, nats://)
     let without_scheme = url
         .split("://")
         .nth(1)
@@ -496,13 +479,12 @@ fn extract_host_port(url: &str, default_port: u16) -> String {
     }
 }
 
-fn tcp_probe(addr: &str, timeout: Duration) -> std::io::Result<()> {
-    let stream = TcpStream::connect_timeout(
-        &addr.parse().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
-        timeout,
-    )?;
-    drop(stream);
-    Ok(())
+async fn tcp_probe(addr: &str, timeout: Duration) -> std::io::Result<()> {
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out")),
+    }
 }
 
 // libc needed only for getuid on Linux

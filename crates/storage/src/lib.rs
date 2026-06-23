@@ -100,18 +100,25 @@ impl Storage {
             anyhow::bail!("Storage not bootstrapped: call bootstrap_organization() first");
         }
 
-        sqlx::query(
-            "INSERT INTO events (id, organization_id, agent_id, event_type, severity, message, created_at) VALUES ($1, $2, $3, $4, $5::text::event_severity, $6, $7)"
-        )
-        .bind(id)
-        .bind(self.default_org_id)
-        .bind(agent_id)
-        .bind(event_type)
-        .bind(severity)
-        .bind(message)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        // Embed event_type and severity as string literals with ::event_type / ::event_severity cast.
+        // Bound parameters ($4, $5) trigger a PostgreSQL type mismatch when the column uses a custom enum,
+        // because sqlx sends them as text and the prepared statement can't resolve the enum cast.
+        // These values come from internal NATS subjects, not user input, so embedding is safe.
+        let sql = format!(
+            "INSERT INTO events (id, organization_id, agent_id, event_type, severity, message, created_at) \
+             VALUES ($1, $2, $3, '{}'::event_type, '{}'::event_severity, $4, $5)",
+            event_type.replace('\'', "''"),
+            severity.replace('\'', "''")
+        );
+
+        sqlx::query(&sql)
+            .bind(id)
+            .bind(self.default_org_id)
+            .bind(agent_id)
+            .bind(message)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
 
         Ok(id)
     }

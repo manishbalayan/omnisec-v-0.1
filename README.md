@@ -48,6 +48,9 @@ Then open **http://localhost:3000** in your browser.
 # Start infrastructure (PostgreSQL, NATS)
 docker compose -f tests/integration/docker-compose.test.yml up -d postgres nats
 
+# Or use the all-in-one container (recommended):
+docker compose -f tests/integration/docker-compose.test.yml up -d omnisec
+
 # Run API server
 cargo run --bin omnisec-api
 

@@ -128,6 +128,9 @@ async fn main() -> Result<()> {
         total_restarts: 0,
     }));
 
+    // Clone storage for discovery task (must happen before storage is moved into audit trail)
+    let discovery_storage = storage.clone();
+
     // =====================================================================
     // Task 1: Discovery ticker — scans processes and publishes to NATS
     // =====================================================================
@@ -135,6 +138,9 @@ async fn main() -> Result<()> {
     let discovery = AgentDiscovery::new();
     tokio::spawn(async move {
         let mut cycle = 0u64;
+        // Track already-stored agents by PID to avoid duplicate inserts
+        let mut stored_agents: std::collections::HashMap<u32, uuid::Uuid> = std::collections::HashMap::new();
+
         loop {
             cycle += 1;
             tracing::debug!("Discovery cycle {}", cycle);
@@ -142,6 +148,21 @@ async fn main() -> Result<()> {
             match discovery.discover_agents() {
                 Ok(agents) => {
                     for agent in &agents {
+                        // Persist new agents to database (only on first discovery)
+                        if !stored_agents.contains_key(&agent.pid) {
+                            if let Some(ref store) = discovery_storage {
+                                match store.create_agent(&agent.name, Some(agent.pid as i32)).await {
+                                    Ok(agent_id) => {
+                                        stored_agents.insert(agent.pid, agent_id);
+                                        tracing::info!("Stored agent {} (PID: {}) in database", agent.name, agent.pid);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to store agent {}: {}", agent.name, e);
+                                    }
+                                }
+                            }
+                        }
+
                         let payload = AgentDiscoveredPayload {
                             pid: agent.pid,
                             ppid: agent.ppid,
@@ -554,10 +575,14 @@ async fn main() -> Result<()> {
             while let Some((subject, envelope)) = all_sub.next().await {
                 let summary = format!("{} event from {}", subject, envelope.source);
 
+                let event_type = subject
+                    .replace('.', "_")
+                    .trim_start_matches("omnisec_")
+                    .to_string();
                 if let Err(e) = storage
                     .create_event(
                         None,
-                        &subject.replace('.', "_"),
+                        &event_type,
                         "info",
                         &summary,
                     )
