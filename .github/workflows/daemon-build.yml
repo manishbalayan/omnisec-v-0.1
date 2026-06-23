@@ -83,7 +83,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.binary_name }}
-          path: target/${{ matrix.target }}/release/omnissec-daemon
+          path: target/${{ matrix.target }}/release/omnisec-daemon
           retention-days: 30
 
   package:
