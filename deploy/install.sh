@@ -166,23 +166,36 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${OMNISEC_CONTAINER_NAME}$"; t
 fi
 
 # =============================================================================
-# Step 4: Pull the image
+# Step 4: Pull the image (or build from source if not available)
 # =============================================================================
 echo ""
-echo -e "${YELLOW}◆ Pulling OmniSec image...${NC}"
+echo -e "${YELLOW}◆ Checking for OmniSec image...${NC}"
 echo "  Image: ${OMNISEC_IMAGE}:${OMNISEC_TAG}"
 
-if docker pull "${OMNISEC_IMAGE}:${OMNISEC_TAG}" 2>&1; then
+# Try to pull the image first
+if docker pull "${OMNISEC_IMAGE}:${OMNISEC_TAG}" 2>/dev/null; then
     echo -e "${GREEN}  ✓ Image pulled${NC}"
+    IMAGE_TO_USE="${OMNISEC_IMAGE}:${OMNISEC_TAG}"
 else
-    echo ""
-    echo -e "${RED}  ✗ Failed to pull image${NC}"
-    echo ""
-    echo "  Check:"
-    echo "    - Is Docker Hub accessible? (proxy/firewall)"
-    echo "    - Does the image exist? Try: docker search omnisec"
-    echo ""
-    exit 1
+    echo -e "${YELLOW}  ⚠ Image not found on Docker Hub, building from source...${NC}"
+    # Create a temporary directory for building
+    TMP_BUILD_DIR=$(mktemp -d)
+    if git clone https://github.com/manishbalayan/omnisec-v-0.1.git "$TMP_BUILD_DIR" 2>/dev/null; then
+        echo "  Cloned repository, building image..."
+        if cd "$TMP_BUILD_DIR" && docker build -f deploy/Dockerfile.all-in-one -t omnisec/omnisec .; then
+            echo -e "${GREEN}  ✓ Image built successfully${NC}"
+            IMAGE_TO_USE="omnisec/omnisec"
+            cd -
+        else
+            echo -e "${RED}  ✗ Failed to build image${NC}"
+            rm -rf "$TMP_BUILD_DIR"
+            exit 1
+        fi
+        rm -rf "$TMP_BUILD_DIR"
+    else
+        echo -e "${RED}  ✗ Failed to clone repository for building${NC}"
+        exit 1
+    fi
 fi
 
 # =============================================================================

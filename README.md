@@ -21,7 +21,7 @@ Omnisec sits below AI agents and their harnesses at the operating system and net
 ### Installation
 
 ```bash
-curl -fsSL https://install.omnisec.ai | sh
+curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh
 ```
 
 This will pull the all-in-one image, create a persistent data volume, and start all services automatically.
