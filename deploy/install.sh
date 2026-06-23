@@ -25,7 +25,7 @@ set -e
 REPO_OWNER="${GITHUB_REPO_OWNER:-manishbalayan}"
 REPO_NAME="${GITHUB_REPO_NAME:-omnisec-v-0.1}"
 RELEASE_TAG="${OMNISEC_VERSION:-v0.1.0-daemon}"
-DAEMON_BIN_DIR="${OMNISEC_DAEMON_BIN_DIR:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}"
+DAEMON_BIN_DIR="${OMNISEC_DAEMON_BIN_DIR:-https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}}"
 
 # Default ports
 DEFAULT_DASHBOARD_PORT=3000
@@ -203,7 +203,7 @@ fi
 
 # ============================================================================
 # Step 4: Download and verify SHA256 checksum
-# =============================================================================
+# ============================================================================
 echo ""
 echo "◆ Verifying binary checksum"
 
@@ -249,7 +249,7 @@ echo ""
 
 # =============================================================================
 # Step 6: Create systemd service
-# =============================================================================
+# ============================================================================
 echo "◆ Setting up systemd service"
 
 cat > /etc/systemd/system/omnisec-daemon.service << EOF
@@ -280,7 +280,7 @@ echo ""
 
 # =============================================================================
 # Step 7: Start daemon
-# =============================================================================
+# ============================================================================
 echo "◆ Starting omnisec-daemon service"
 
 if systemctl enable omnisec-daemon; then
@@ -328,7 +328,7 @@ echo ""
 
 # =============================================================================
 # Step 8: Pull Docker image
-# =============================================================================
+# ============================================================================
 echo "◆ Pulling OmniSec Docker image"
 
 if docker pull manishbalayan/omnisec:v0.1.0 2>&1; then
@@ -346,7 +346,7 @@ echo ""
 
 # =============================================================================
 # Step 9: Detect available ports
-# =============================================================================
+# ============================================================================
 echo "◆ Checking port availability"
 
 DASHBOARD_PORT=$DEFAULT_DASHBOARD_PORT
@@ -409,9 +409,9 @@ DOCKER_RUN_ARGS=(
     --cap-add NET_ADMIN
     --cap-add DAC_READ_SEARCH
     -e "DASHBOARD_PORT=3000"
-    -e "OMNISEC_DASHBOARD_EXTERNAL_PORT=${DASHBOARD_PORT}"
-    -e "OMNISEC_API_EXTERNAL_PORT=${API_PORT}"
-    -e "OMNISEC_DAEMON_HEALTH_EXTERNAL_PORT=${DAEMON_HEALTH_PORT}"
+    -e "OMNISEC_DASHBOARD_EXTERNAL_PORT=\"${DASHBOARD_PORT}\""
+    -e "OMNISEC_API_EXTERNAL_PORT=\"${API_PORT}\""
+    -e "OMNISEC_DAEMON_HEALTH_EXTERNAL_PORT=\"${DAEMON_HEALTH_PORT}\""
     -d
 )
 
@@ -500,4 +500,10 @@ case "${OS}" in
         if command -v xdg-open &>/dev/null; then
             xdg-open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
         elif command -v goat &>/dev/null; then
-            goat "http://localhost:${DASHBOARD_PORT}" 2>/dev
+            goat "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+        fi
+        ;;
+    Darwin)
+        open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+        ;;
+esac
