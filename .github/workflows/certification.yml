@@ -67,6 +67,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Cache Docker layers
@@ -80,11 +81,13 @@ jobs:
       - name: Build Docker image
         run: |
           echo "=== PHASE 1: BUILD ==="
-          docker build \
+          docker buildx build \
+            --builder "${{ steps.buildx.outputs.name }}" \
             -f deploy/Dockerfile.all-in-one \
             -t omnisec/omnisec:ci \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --load \
             .
           echo "Image size: $(docker images omnisec/omnisec:ci --format '{{.Size}}')"
           echo "✓ Phase 1 complete"
