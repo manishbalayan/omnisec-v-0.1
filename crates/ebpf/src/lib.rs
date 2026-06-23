@@ -34,10 +34,10 @@ use tracing::{debug, info, warn};
 
 #[cfg(target_os = "linux")]
 use aya::{
-    programs::{TracePoint, KProbe, XdpLink},
-    util::online_cpus,
-    maps::{MapRefMut, RingBuf},
+    programs::TracePoint,
+    maps::{RingBuf, MapData},
     Ebpf, Btf,
+    include_bytes_aligned,
 };
 
 // =========================================================================
@@ -210,15 +210,15 @@ pub struct EbpfManager {
     loaded: bool,
     /// Whether we're using /proc fallback instead of eBPF
     using_fallback: bool,
-    /// Ring buffer readers — one per CPU per map
+    /// Ring buffer readers — one per map (shared across CPUs)
     #[cfg(target_os = "linux")]
-    process_ring_bufs: Vec<RingBuf<MapRefMut>>,
+    process_ring_buf: Option<RingBuf<MapData>>,
     #[cfg(target_os = "linux")]
-    network_ring_bufs: Vec<RingBuf<MapRefMut>>,
+    network_ring_buf: Option<RingBuf<MapData>>,
     #[cfg(target_os = "linux")]
-    file_ring_bufs: Vec<RingBuf<MapRefMut>>,
+    file_ring_buf: Option<RingBuf<MapData>>,
     #[cfg(target_os = "linux")]
-    dns_ring_bufs: Vec<RingBuf<MapRefMut>>,
+    dns_ring_buf: Option<RingBuf<MapData>>,
     /// eBPF object
     #[cfg(target_os = "linux")]
     bpf: Option<Ebpf>,
@@ -248,13 +248,13 @@ impl EbpfManager {
             event_tx: None,
             fallback_running: false,
             #[cfg(target_os = "linux")]
-            process_ring_bufs: Vec::new(),
+            process_ring_buf: None,
             #[cfg(target_os = "linux")]
-            network_ring_bufs: Vec::new(),
+            network_ring_buf: None,
             #[cfg(target_os = "linux")]
-            file_ring_bufs: Vec::new(),
+            file_ring_buf: None,
             #[cfg(target_os = "linux")]
-            dns_ring_bufs: Vec::new(),
+            dns_ring_buf: None,
             #[cfg(target_os = "linux")]
             bpf: None,
         }
@@ -296,9 +296,11 @@ impl EbpfManager {
                     self.loaded = true;
                     self.using_fallback = false;
 
-                    let mut stats = self.stats.write().await;
-                    stats.ebpf_loaded = true;
-                    stats.using_fallback = false;
+                    {
+                        let mut stats = self.stats.write().await;
+                        stats.ebpf_loaded = true;
+                        stats.using_fallback = false;
+                    } // stats guard dropped, releasing the borrow on self
 
                     // Start the ring buffer reader tasks
                     self.start_ring_buffer_readers();
@@ -343,93 +345,91 @@ impl EbpfManager {
         let bpf_bytes = include_bytes_aligned!(concat!(env!("OUT_DIR"), "/omnisec-ebpf-bpf"));
         let mut bpf = Ebpf::load(bpf_bytes)?;
 
+        // Helper to convert Option<&mut Program> to the expected program type
+        macro_rules! load_tracepoint {
+            ($bpf:expr, $name:expr) => {{
+                let prog: &mut TracePoint = $bpf.program_mut($name)
+                    .ok_or_else(|| anyhow::anyhow!("program {} not found", $name))?
+                    .try_into()?;
+                prog.load()?;
+                prog
+            }};
+        }
+
         // --- Load tracepoint: sched_process_exec ---
-        let program: &mut TracePoint = bpf.program_mut("sched_process_exec")?
-            .try_into()?;
-        program.load()?;
-        program.attach("sched", "sched_process_exec")?;
-        info!("Attached sched_process_exec tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sched_process_exec");
+            program.attach("sched", "sched_process_exec")?;
+            info!("Attached sched_process_exec tracepoint");
+        }
 
         // --- Load tracepoint: sched_process_exit ---
-        let program: &mut TracePoint = bpf.program_mut("sched_process_exit")?
-            .try_into()?;
-        program.load()?;
-        program.attach("sched", "sched_process_exit")?;
-        info!("Attached sched_process_exit tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sched_process_exit");
+            program.attach("sched", "sched_process_exit")?;
+            info!("Attached sched_process_exit tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_clone ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_clone")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_clone")?;
-        info!("Attached sys_enter_clone tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_clone");
+            program.attach("syscalls", "sys_enter_clone")?;
+            info!("Attached sys_enter_clone tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_connect ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_connect")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_connect")?;
-        info!("Attached sys_enter_connect tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_connect");
+            program.attach("syscalls", "sys_enter_connect")?;
+            info!("Attached sys_enter_connect tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_bind ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_bind")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_bind")?;
-        info!("Attached sys_enter_bind tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_bind");
+            program.attach("syscalls", "sys_enter_bind")?;
+            info!("Attached sys_enter_bind tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_accept4 ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_accept4")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_accept4")?;
-        info!("Attached sys_enter_accept4 tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_accept4");
+            program.attach("syscalls", "sys_enter_accept4")?;
+            info!("Attached sys_enter_accept4 tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_openat ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_openat")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_openat")?;
-        info!("Attached sys_enter_openat tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_openat");
+            program.attach("syscalls", "sys_enter_openat")?;
+            info!("Attached sys_enter_openat tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_unlinkat ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_unlinkat")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_unlinkat")?;
-        info!("Attached sys_enter_unlinkat tracepoint");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_unlinkat");
+            program.attach("syscalls", "sys_enter_unlinkat")?;
+            info!("Attached sys_enter_unlinkat tracepoint");
+        }
 
         // --- Load tracepoint: sys_enter_sendto (DNS queries) ---
-        let program: &mut TracePoint = bpf.program_mut("sys_enter_sendto")?
-            .try_into()?;
-        program.load()?;
-        program.attach("syscalls", "sys_enter_sendto")?;
-        info!("Attached sys_enter_sendto tracepoint (DNS port 53)");
+        {
+            let program = load_tracepoint!(bpf, "sys_enter_sendto");
+            program.attach("syscalls", "sys_enter_sendto")?;
+            info!("Attached sys_enter_sendto tracepoint (DNS port 53)");
+        }
 
-        // Open the ring buffer maps
-        let process_map: MapRefMut = bpf.map_mut("PROCESS_EVENTS")?;
-        let network_map: MapRefMut = bpf.map_mut("NETWORK_EVENTS")?;
-        let file_map: MapRefMut = bpf.map_mut("FILE_EVENTS")?;
-        let dns_map: MapRefMut = bpf.map_mut("DNS_EVENTS")?;
+        // Create ring buffer readers — one per map (shared across CPUs in kernel)
+        fn take_ring_buf(bpf: &mut Ebpf, name: &str) -> Result<RingBuf<MapData>> {
+            Ok(RingBuf::try_from(
+                bpf.take_map(name).ok_or_else(|| anyhow::anyhow!("map {} not found", name))?
+            )?)
+        }
 
-        // Create per-CPU ring buffer readers
-        let cpus = online_cpus()?;
-        for cpu in cpus {
-            let rb = RingBuf::try_from(process_map.try_clone()?)?;
-            self.process_ring_bufs.push(rb);
-        }
-        for cpu in cpus.clone() {
-            let rb = RingBuf::try_from(network_map.try_clone()?)?;
-            self.network_ring_bufs.push(rb);
-        }
-        for cpu in cpus.clone() {
-            let rb = RingBuf::try_from(file_map.try_clone()?)?;
-            self.file_ring_bufs.push(rb);
-        }
-        for _cpu in cpus {
-            let rb = RingBuf::try_from(dns_map.try_clone()?)?;
-            self.dns_ring_bufs.push(rb);
-        }
+        self.process_ring_buf = Some(take_ring_buf(&mut bpf, "PROCESS_EVENTS")?);
+        self.network_ring_buf = Some(take_ring_buf(&mut bpf, "NETWORK_EVENTS")?);
+        self.file_ring_buf = Some(take_ring_buf(&mut bpf, "FILE_EVENTS")?);
+        self.dns_ring_buf = Some(take_ring_buf(&mut bpf, "DNS_EVENTS")?);
 
         self.bpf = Some(bpf);
         Ok(())
@@ -448,77 +448,74 @@ impl EbpfManager {
         let stats = self.stats.clone();
         let identity = self.identity.clone();
 
-        // Process events reader
-        let ring_bufs = std::mem::take(&mut self.process_ring_bufs);
+        // Process events reader — single RingBuf, shared across CPUs
+        let mut process_rb = self.process_ring_buf.take().expect("process ring buf not initialized");
         let tx_clone = tx.clone();
         let stats_clone = stats.clone();
         let identity_clone = identity.clone();
         tokio::spawn(async move {
-            let mut bufs = ring_bufs;
             loop {
-                for buf in &mut bufs {
-                    while let Some(raw) = buf.next() {
-                        if raw.len() < size_of::<ProcessEvent>() {
+                while let Some(raw) = process_rb.next() {
+                    if raw.len() < size_of::<ProcessEvent>() {
+                        let mut s = stats_clone.write().await;
+                        s.read_errors += 1;
+                        continue;
+                    }
+                    let event: ProcessEvent = unsafe { *(raw.as_ptr() as *const ProcessEvent) };
+
+                    // Resolve PID to agent
+                    let agent_id = if let Some(ref identity) = identity_clone {
+                        let ident = identity.read().await;
+                        ident.resolve_pid(event.pid)
+                            .map(|i| i.agent_id.to_string())
+                    } else {
+                        None
+                    };
+
+                    let ts = Utc::now();
+
+                    match event.event_type {
+                        t if t == EVENT_PROCESS_EXEC as u8 => {
+                            let exec_evt = ProcessExecEvent {
+                                pid: event.pid,
+                                ppid: event.ppid,
+                                uid: event.uid,
+                                comm: event.comm_str().to_string(),
+                                filename: event.filename_str().to_string(),
+                                timestamp: ts,
+                                agent_id,
+                            };
+                            let _ = tx_clone.send(KernelEvent::ProcessExec(exec_evt));
                             let mut s = stats_clone.write().await;
-                            s.read_errors += 1;
-                            continue;
+                            s.events_total += 1;
+                            s.process_exec_count += 1;
                         }
-                        let event: ProcessEvent = unsafe { *(raw.as_ptr() as *const ProcessEvent) };
-
-                        // Resolve PID to agent
-                        let agent_id = if let Some(ref identity) = identity_clone {
-                            let ident = identity.read().await;
-                            ident.resolve_pid(event.pid)
-                                .map(|i| i.agent_id.to_string())
-                        } else {
-                            None
-                        };
-
-                        let ts = Utc::now();
-
-                        match event.event_type {
-                            t if t == EVENT_PROCESS_EXEC as u8 => {
-                                let exec_evt = ProcessExecEvent {
-                                    pid: event.pid,
-                                    ppid: event.ppid,
-                                    uid: event.uid,
-                                    comm: event.comm_str().to_string(),
-                                    filename: event.filename_str().to_string(),
-                                    timestamp: ts,
-                                    agent_id,
-                                };
-                                let _ = tx_clone.send(KernelEvent::ProcessExec(exec_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.process_exec_count += 1;
-                            }
-                            t if t == EVENT_PROCESS_EXIT as u8 => {
-                                let exit_evt = ProcessExitEvent {
-                                    pid: event.pid,
-                                    exit_code: event.exit_code,
-                                    timestamp: ts,
-                                };
-                                let _ = tx_clone.send(KernelEvent::ProcessExit(exit_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.process_exit_count += 1;
-                            }
-                            t if t == EVENT_PROCESS_FORK as u8 => {
-                                let fork_evt = ProcessForkEvent {
-                                    parent_pid: event.ppid,
-                                    child_pid: event.child_pid,
-                                    comm: event.comm_str().to_string(),
-                                    timestamp: ts,
-                                };
-                                let _ = tx_clone.send(KernelEvent::ProcessFork(fork_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.process_fork_count += 1;
-                            }
-                            _ => {
-                                let mut s = stats_clone.write().await;
-                                s.dropped_events += 1;
-                            }
+                        t if t == EVENT_PROCESS_EXIT as u8 => {
+                            let exit_evt = ProcessExitEvent {
+                                pid: event.pid,
+                                exit_code: event.exit_code,
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::ProcessExit(exit_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.process_exit_count += 1;
+                        }
+                        t if t == EVENT_PROCESS_FORK as u8 => {
+                            let fork_evt = ProcessForkEvent {
+                                parent_pid: event.ppid,
+                                child_pid: event.child_pid,
+                                comm: event.comm_str().to_string(),
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::ProcessFork(fork_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.process_fork_count += 1;
+                        }
+                        _ => {
+                            let mut s = stats_clone.write().await;
+                            s.dropped_events += 1;
                         }
                     }
                 }
@@ -527,82 +524,80 @@ impl EbpfManager {
         });
 
         // Network events reader
-        let net_ring_bufs = std::mem::take(&mut self.network_ring_bufs);
+        let mut network_rb = self.network_ring_buf.take().expect("network ring buf not initialized");
+        let tx_clone = tx.clone();
         let stats_clone = stats.clone();
         tokio::spawn(async move {
-            let mut bufs = net_ring_bufs;
             loop {
-                for buf in &mut bufs {
-                    while let Some(raw) = buf.next() {
-                        if raw.len() < size_of::<NetworkEvent>() {
+                while let Some(raw) = network_rb.next() {
+                    if raw.len() < size_of::<NetworkEvent>() {
+                        let mut s = stats_clone.write().await;
+                        s.read_errors += 1;
+                        continue;
+                    }
+                    let event: NetworkEvent = unsafe { *(raw.as_ptr() as *const NetworkEvent) };
+                    let ts = Utc::now();
+
+                    let ip_str = format!("{}.{}.{}.{}", event.dest_ip[0], event.dest_ip[1],
+                                         event.dest_ip[2], event.dest_ip[3]);
+                    let src_ip = format!("{}.{}.{}.{}", event.src_ip[0], event.src_ip[1],
+                                         event.src_ip[2], event.src_ip[3]);
+                    let proto = match event.protocol {
+                        PROTOCOL_TCP => "tcp",
+                        PROTOCOL_TCP6 => "tcp6",
+                        PROTOCOL_UDP => "udp",
+                        _ => "unknown",
+                    };
+
+                    match event.event_type {
+                        t if t == EVENT_NETWORK_CONNECT as u8 => {
+                            let conn_evt = NetworkConnectEvent {
+                                pid: event.pid,
+                                dest_ip: ip_str,
+                                dest_port: event.dest_port,
+                                src_ip,
+                                src_port: event.src_port,
+                                protocol: proto.to_string(),
+                                timestamp: ts,
+                                agent_id: None,
+                            };
+                            let _ = tx_clone.send(KernelEvent::NetworkConnect(conn_evt));
                             let mut s = stats_clone.write().await;
-                            s.read_errors += 1;
-                            continue;
+                            s.events_total += 1;
+                            s.network_connect_count += 1;
                         }
-                        let event: NetworkEvent = unsafe { *(raw.as_ptr() as *const NetworkEvent) };
-                        let ts = Utc::now();
-
-                        let ip_str = format!("{}.{}.{}.{}", event.dest_ip[0], event.dest_ip[1],
-                                             event.dest_ip[2], event.dest_ip[3]);
-                        let src_ip = format!("{}.{}.{}.{}", event.src_ip[0], event.src_ip[1],
-                                             event.src_ip[2], event.src_ip[3]);
-                        let proto = match event.protocol {
-                            PROTOCOL_TCP => "tcp",
-                            PROTOCOL_TCP6 => "tcp6",
-                            PROTOCOL_UDP => "udp",
-                            _ => "unknown",
-                        };
-
-                        match event.event_type {
-                            t if t == EVENT_NETWORK_CONNECT as u8 => {
-                                let conn_evt = NetworkConnectEvent {
-                                    pid: event.pid,
-                                    dest_ip: ip_str,
-                                    dest_port: event.dest_port,
-                                    src_ip,
-                                    src_port: event.src_port,
-                                    protocol: proto.to_string(),
-                                    timestamp: ts,
-                                    agent_id: None,
-                                };
-                                let _ = tx.send(KernelEvent::NetworkConnect(conn_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.network_connect_count += 1;
-                            }
-                            t if t == EVENT_NETWORK_LISTEN as u8 => {
-                                let listen_evt = NetworkListenEvent {
-                                    pid: event.pid,
-                                    ip: ip_str,
-                                    port: event.dest_port,
-                                    protocol: proto.to_string(),
-                                    timestamp: ts,
-                                };
-                                let _ = tx.send(KernelEvent::NetworkListen(listen_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.network_listen_count += 1;
-                            }
-                            t if t == EVENT_NETWORK_ACCEPT as u8 => {
-                                let accept_evt = NetworkAcceptEvent {
-                                    pid: event.pid,
-                                    client_ip: ip_str,
-                                    client_port: event.client_port,
-                                    server_ip: format!("{}.{}.{}.{}",
-                                        event.src_ip[0], event.src_ip[1],
-                                        event.src_ip[2], event.src_ip[3]),
-                                    server_port: event.server_port,
-                                    timestamp: ts,
-                                };
-                                let _ = tx.send(KernelEvent::NetworkAccept(accept_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.network_accept_count += 1;
-                            }
-                            _ => {
-                                let mut s = stats_clone.write().await;
-                                s.dropped_events += 1;
-                            }
+                        t if t == EVENT_NETWORK_LISTEN as u8 => {
+                            let listen_evt = NetworkListenEvent {
+                                pid: event.pid,
+                                ip: ip_str,
+                                port: event.dest_port,
+                                protocol: proto.to_string(),
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::NetworkListen(listen_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.network_listen_count += 1;
+                        }
+                        t if t == EVENT_NETWORK_ACCEPT as u8 => {
+                            let accept_evt = NetworkAcceptEvent {
+                                pid: event.pid,
+                                client_ip: ip_str,
+                                client_port: event.client_port,
+                                server_ip: format!("{}.{}.{}.{}",
+                                    event.src_ip[0], event.src_ip[1],
+                                    event.src_ip[2], event.src_ip[3]),
+                                server_port: event.server_port,
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::NetworkAccept(accept_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.network_accept_count += 1;
+                        }
+                        _ => {
+                            let mut s = stats_clone.write().await;
+                            s.dropped_events += 1;
                         }
                     }
                 }
@@ -611,84 +606,82 @@ impl EbpfManager {
         });
 
         // File events reader
-        let file_ring_bufs = std::mem::take(&mut self.file_ring_bufs);
+        let mut file_rb = self.file_ring_buf.take().expect("file ring buf not initialized");
+        let tx_clone = tx.clone();
         let stats_clone = stats.clone();
         let identity_clone = identity.clone();
         tokio::spawn(async move {
-            let mut bufs = file_ring_bufs;
             loop {
-                for buf in &mut bufs {
-                    while let Some(raw) = buf.next() {
-                        if raw.len() < size_of::<FileEvent>() {
+                while let Some(raw) = file_rb.next() {
+                    if raw.len() < size_of::<FileEvent>() {
+                        let mut s = stats_clone.write().await;
+                        s.read_errors += 1;
+                        continue;
+                    }
+                    let event: FileEvent = unsafe { *(raw.as_ptr() as *const FileEvent) };
+                    let ts = Utc::now();
+                    let path = event.path_str().to_string();
+                    let operation = event.operation_str().to_string();
+
+                    // Check for sensitive paths
+                    let sensitive_patterns = [
+                        "/etc/passwd", "/etc/shadow", "/etc/ssh",
+                        ".ssh", ".env", "credentials", "tokens",
+                        ".gitconfig", ".aws", ".gcp", "id_rsa",
+                    ];
+                    let sensitive_match = sensitive_patterns.iter()
+                        .any(|p| path.contains(p));
+
+                    let agent_id = if let Some(ref identity) = identity_clone {
+                        let ident = identity.read().await;
+                        ident.resolve_pid(event.pid)
+                            .map(|i| i.agent_id.to_string())
+                    } else {
+                        None
+                    };
+
+                    match event.event_type {
+                        t if t == EVENT_FILE_ACCESS as u8 => {
+                            if sensitive_match {
+                                warn!("SENSITIVE FILE ACCESS: PID {} accessed {}", event.pid, path);
+                            }
+                            let access_evt = FileAccessEvent {
+                                pid: event.pid,
+                                path,
+                                operation,
+                                flags: event.flags,
+                                timestamp: ts,
+                                sensitive_match,
+                                agent_id,
+                            };
+                            let _ = tx_clone.send(KernelEvent::FileAccess(access_evt));
                             let mut s = stats_clone.write().await;
-                            s.read_errors += 1;
-                            continue;
+                            s.events_total += 1;
+                            s.file_access_count += 1;
                         }
-                        let event: FileEvent = unsafe { *(raw.as_ptr() as *const FileEvent) };
-                        let ts = Utc::now();
-                        let path = event.path_str().to_string();
-                        let operation = event.operation_str().to_string();
-
-                        // Check for sensitive paths
-                        let sensitive_patterns = [
-                            "/etc/passwd", "/etc/shadow", "/etc/ssh",
-                            ".ssh", ".env", "credentials", "tokens",
-                            ".gitconfig", ".aws", ".gcp", "id_rsa",
-                        ];
-                        let sensitive_match = sensitive_patterns.iter()
-                            .any(|p| path.contains(p));
-
-                        let agent_id = if let Some(ref identity) = identity_clone {
-                            let ident = identity.read().await;
-                            ident.resolve_pid(event.pid)
-                                .map(|i| i.agent_id.to_string())
-                        } else {
-                            None
-                        };
-
-                        match event.event_type {
-                            t if t == EVENT_FILE_ACCESS as u8 => {
-                                let access_evt = FileAccessEvent {
-                                    pid: event.pid,
-                                    path,
-                                    operation,
-                                    flags: event.flags,
-                                    timestamp: ts,
-                                    sensitive_match,
-                                    agent_id,
-                                };
-                                let _ = tx.send(KernelEvent::FileAccess(access_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.file_access_count += 1;
-                                if sensitive_match {
-                                    warn!("SENSITIVE FILE ACCESS: PID {} accessed {}", event.pid, path);
-                                }
-                            }
-                            t if t == EVENT_FILE_DELETE as u8 => {
-                                let del_evt = FileDeleteEvent {
-                                    pid: event.pid, path,
-                                    timestamp: ts,
-                                };
-                                let _ = tx.send(KernelEvent::FileDelete(del_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.file_delete_count += 1;
-                            }
-                            t if t == EVENT_FILE_MODIFY as u8 => {
-                                let mod_evt = FileModifyEvent {
-                                    pid: event.pid, path, operation,
-                                    timestamp: ts,
-                                };
-                                let _ = tx.send(KernelEvent::FileModify(mod_evt));
-                                let mut s = stats_clone.write().await;
-                                s.events_total += 1;
-                                s.file_modify_count += 1;
-                            }
-                            _ => {
-                                let mut s = stats_clone.write().await;
-                                s.dropped_events += 1;
-                            }
+                        t if t == EVENT_FILE_DELETE as u8 => {
+                            let del_evt = FileDeleteEvent {
+                                pid: event.pid, path,
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::FileDelete(del_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.file_delete_count += 1;
+                        }
+                        t if t == EVENT_FILE_MODIFY as u8 => {
+                            let mod_evt = FileModifyEvent {
+                                pid: event.pid, path, operation,
+                                timestamp: ts,
+                            };
+                            let _ = tx_clone.send(KernelEvent::FileModify(mod_evt));
+                            let mut s = stats_clone.write().await;
+                            s.events_total += 1;
+                            s.file_modify_count += 1;
+                        }
+                        _ => {
+                            let mut s = stats_clone.write().await;
+                            s.dropped_events += 1;
                         }
                     }
                 }
@@ -697,38 +690,36 @@ impl EbpfManager {
         });
 
         // DNS events reader
-        let dns_ring_bufs = std::mem::take(&mut self.dns_ring_bufs);
+        let mut dns_rb = self.dns_ring_buf.take().expect("dns ring buf not initialized");
+        let tx_clone = tx.clone();
         tokio::spawn(async move {
-            let mut bufs = dns_ring_bufs;
             loop {
-                for buf in &mut bufs {
-                    while let Some(raw) = buf.next() {
-                        if raw.len() < size_of::<DnsEvent>() {
-                            continue;
-                        }
-                        let event: DnsEvent = unsafe { *(raw.as_ptr() as *const DnsEvent) };
-                        let ts = Utc::now();
-                        let resolver = format!("{}.{}.{}.{}",
-                            event.resolver_ip[0], event.resolver_ip[1],
-                            event.resolver_ip[2], event.resolver_ip[3]);
-
-                        let dns_evt = DnsQueryEvent {
-                            pid: event.pid,
-                            domain: format!("hash:{:016x}", event.domain_hash),
-                            query_type: match event.dns_type {
-                                1 => "A".to_string(),
-                                28 => "AAAA".to_string(),
-                                15 => "MX".to_string(),
-                                _ => format!("TYPE{}", event.dns_type),
-                            },
-                            resolver_ip: resolver,
-                            timestamp: ts,
-                        };
-                        let _ = tx.send(KernelEvent::DnsQuery(dns_evt));
-                        let mut s = stats.write().await;
-                        s.events_total += 1;
-                        s.dns_query_count += 1;
+                while let Some(raw) = dns_rb.next() {
+                    if raw.len() < size_of::<DnsEvent>() {
+                        continue;
                     }
+                    let event: DnsEvent = unsafe { *(raw.as_ptr() as *const DnsEvent) };
+                    let ts = Utc::now();
+                    let resolver = format!("{}.{}.{}.{}",
+                        event.resolver_ip[0], event.resolver_ip[1],
+                        event.resolver_ip[2], event.resolver_ip[3]);
+
+                    let dns_evt = DnsQueryEvent {
+                        pid: event.pid,
+                        domain: format!("hash:{:016x}", event.domain_hash),
+                        query_type: match event.dns_type {
+                            1 => "A".to_string(),
+                            28 => "AAAA".to_string(),
+                            15 => "MX".to_string(),
+                            _ => format!("TYPE{}", event.dns_type),
+                        },
+                        resolver_ip: resolver,
+                        timestamp: ts,
+                    };
+                    let _ = tx_clone.send(KernelEvent::DnsQuery(dns_evt));
+                    let mut s = stats.write().await;
+                    s.events_total += 1;
+                    s.dns_query_count += 1;
                 }
                 tokio::time::sleep(Duration::from_micros(100)).await;
             }
@@ -897,10 +888,10 @@ impl EbpfManager {
         #[cfg(target_os = "linux")]
         {
             self.bpf.take();
-            self.process_ring_bufs.clear();
-            self.network_ring_bufs.clear();
-            self.file_ring_bufs.clear();
-            self.dns_ring_bufs.clear();
+            self.process_ring_buf.take();
+            self.network_ring_buf.take();
+            self.file_ring_buf.take();
+            self.dns_ring_buf.take();
         }
 
         self.loaded = false;
@@ -916,27 +907,3 @@ impl Default for EbpfManager {
 
 
 
-// =========================================================================
-// Helper macro for embedding BPF bytecode (Linux only)
-// =========================================================================
-
-#[cfg(target_os = "linux")]
-macro_rules! include_bytes_aligned {
-    ($path:expr) => {{
-        // BPF bytecode must be aligned to 8 bytes
-        const ALIGN: usize = 8;
-        static BYTES: &[u8] = include_bytes!($path);
-        let len = BYTES.len();
-        let padded_len = (len + ALIGN - 1) & !(ALIGN - 1);
-        let mut padded = vec![0u8; padded_len];
-        padded[..len].copy_from_slice(BYTES);
-        padded
-    }};
-}
-
-#[cfg(not(target_os = "linux"))]
-macro_rules! include_bytes_aligned {
-    ($path:expr) => {{
-        Vec::new()
-    }};
-}

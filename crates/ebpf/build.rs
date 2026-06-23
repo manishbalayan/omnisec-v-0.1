@@ -58,6 +58,10 @@ fn build_bpf_programs() {
         if cargo_check.is_none() {
             println!("cargo:warning=bpf-linker not found. Install it with: cargo install bpf-linker");
             println!("cargo:warning=eBPF programs will NOT be compiled. Falling back to /proc monitoring.");
+            // Create a placeholder file so include_bytes_aligned! doesn't fail at compile time.
+            // Ebpf::load() will fail at runtime with the empty data, triggering the /proc fallback.
+            let out_path = out_dir.join("omnisec-ebpf-bpf");
+            std::fs::write(&out_path, []).ok();
             return;
         }
     }
@@ -75,6 +79,9 @@ fn build_bpf_programs() {
     if target_check.is_none() {
         println!("cargo:warning=bpfel-unknown-none target not installed. Install it with: rustup target add bpfel-unknown-none");
         println!("cargo:warning=eBPF programs will NOT be compiled. Falling back to /proc monitoring.");
+        // Create a placeholder file so include_bytes_aligned! doesn't fail at compile time.
+        let out_path = out_dir.join("omnisec-ebpf-bpf");
+        std::fs::write(&out_path, []).ok();
         return;
     }
 
@@ -93,6 +100,9 @@ fn build_bpf_programs() {
 
     if !status.success() {
         println!("cargo:warning=eBPF program compilation failed. Falling back to /proc monitoring.");
+        // Create a placeholder file so include_bytes_aligned! doesn't fail at compile time.
+        let out_path = out_dir.join("omnisec-ebpf-bpf");
+        std::fs::write(&out_path, []).ok();
         return;
     }
 
@@ -107,6 +117,9 @@ fn build_bpf_programs() {
             "cargo:warning=BPF ELF not found at {}. Falling back to /proc monitoring.",
             bpf_elf.display()
         );
+        // Create a placeholder file so include_bytes_aligned! doesn't fail at compile time.
+        let out_path = out_dir.join("omnisec-ebpf-bpf");
+        std::fs::write(&out_path, []).ok();
         return;
     }
 
