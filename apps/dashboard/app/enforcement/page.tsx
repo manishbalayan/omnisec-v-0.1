@@ -15,6 +15,7 @@ interface DecisionRecord {
   rule: string
   confidence: number
   policy_name: string
+  policy_version: number
   timestamp: string
   context: {
     risk_score: number

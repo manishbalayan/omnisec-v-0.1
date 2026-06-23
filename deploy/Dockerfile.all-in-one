@@ -170,7 +170,6 @@ COPY --from=rust-builder /app/crates/storage/migrations /usr/share/omnisec/migra
 # =============================================================================
 COPY --from=dashboard-builder /app/.next/standalone /opt/omnisec-dashboard
 COPY --from=dashboard-builder /app/.next/static /opt/omnisec-dashboard/.next/static
-COPY --from=dashboard-builder /app/public /opt/omnisec-dashboard/public
 
 # =============================================================================
 # Copy deploy configs

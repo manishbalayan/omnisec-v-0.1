@@ -23,8 +23,6 @@ members = [
     "crates/ebpf",
     "crates/identity",
     "services/daemon",
-    "services/proxy",
-    "services/policy-engine",
     "services/doctor",
     "services/support-bundle",
     "apps/api",
