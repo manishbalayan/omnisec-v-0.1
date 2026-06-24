@@ -142,10 +142,8 @@ else
     echo "    Linux:   curl -fsSL https://get.docker.com | sh"
     echo "    macOS:   https://docs.docker.com/desktop/install/mac-install/"
     echo ""
-    echo "  After installing Docker, run this installer again:"
-    echo "    curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/deploy/install.sh | sh"
+    echo "  Proceeding with installer; Docker will be started automatically if possible."
     echo ""
-    exit 1
 fi
 
 # Check if Docker CLI exists
