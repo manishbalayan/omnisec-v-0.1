@@ -453,19 +453,18 @@ printf "━━━ Step 7: Starting OmniSec Daemon ━━━\n"
 # Create log directory
 sudo mkdir -p "${LOG_DIR}"
 
-case "${OS}" in
-    # If the binary is clearly a stub (< 1 MB), skip daemon start but continue
-    # to the Docker control plane build. The Docker image builds all binaries
-    # from source and runs the daemon inside the container.
-    BINARY_SIZE="$(file_size_bytes "${DAEMON_BIN}")"
-    if [ "$BINARY_SIZE" -lt 1000000 ] 2>/dev/null; then
-        warn "Daemon binary is only ${BINARY_SIZE} bytes (expected multi-MB) — skipping host daemon start"
-        warn "The Docker control plane will provide complete functionality"
-    else
-        case "${OS}" in
-            Linux)
-                # Create systemd service
-                sudo tee /etc/systemd/system/omnisec-daemon.service >/dev/null << 'SERVICE_EOF'
+# If the binary is clearly a stub (< 1 MB), skip daemon start but continue
+# to the Docker control plane build. The Docker image builds all binaries
+# from source and runs the daemon inside the container.
+BINARY_SIZE="$(file_size_bytes "${DAEMON_BIN}")"
+if [ "$BINARY_SIZE" -lt 1000000 ] 2>/dev/null; then
+    warn "Daemon binary is only ${BINARY_SIZE} bytes (expected multi-MB) — skipping host daemon start"
+    warn "The Docker control plane will provide complete functionality"
+else
+    case "${OS}" in
+        Linux)
+            # Create systemd service
+            sudo tee /etc/systemd/system/omnisec-daemon.service >/dev/null << 'SERVICE_EOF'
 [Unit]
 Description=OmniSec Daemon - Host-level Process Monitoring
 After=network-online.target
@@ -486,21 +485,21 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 SERVICE_EOF
 
-                sudo systemctl daemon-reload
-                sudo systemctl enable omnisec-daemon
-                sudo systemctl start omnisec-daemon
+            sudo systemctl daemon-reload
+            sudo systemctl enable omnisec-daemon
+            sudo systemctl start omnisec-daemon
 
-                if systemctl is-active --quiet omnisec-daemon; then
-                    success "Systemd service created and daemon started"
-                else
-                    warn "Failed to start daemon — continuing without it"
-                    warn "The Docker control plane will provide all functionality"
-                fi
-                ;;
+            if systemctl is-active --quiet omnisec-daemon; then
+                success "Systemd service created and daemon started"
+            else
+                warn "Failed to start daemon — continuing without it"
+                warn "The Docker control plane will provide all functionality"
+            fi
+            ;;
 
-            Darwin)
-                # Create launchd plist for macOS
-                sudo tee /Library/LaunchDaemons/com.omnisec.daemon.plist >/dev/null << 'PLIST_EOF'
+        Darwin)
+            # Create launchd plist for macOS
+            sudo tee /Library/LaunchDaemons/com.omnisec.daemon.plist >/dev/null << 'PLIST_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -536,11 +535,11 @@ SERVICE_EOF
 </plist>
 PLIST_EOF
 
-                sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist
-                success "Launchd plist created and daemon started"
-                ;;
-        esac
-    fi
+            sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist
+            success "Launchd plist created and daemon started"
+            ;;
+    esac
+fi
 printf "\n"
 
 # =============================================================================
