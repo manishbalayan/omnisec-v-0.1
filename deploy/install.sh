@@ -243,9 +243,20 @@ if ! docker info >/dev/null 2>&1; then
     warn "Docker daemon is not running — attempting to start"
     case "${OS}" in
         Linux)
-            # Need to start dockerd if just installed
-            sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || \
-                (sudo dockerd >/dev/null 2>&1 &)
+            # Try multiple methods to start Docker daemon
+            if has_cmd systemctl; then
+                sudo systemctl enable docker 2>/dev/null || true
+                sudo systemctl start docker 2>/dev/null || true
+            fi
+            if ! docker info >/dev/null 2>&1; then
+                sudo service docker start 2>/dev/null || true
+            fi
+            # Last resort: start dockerd directly
+            if ! docker info >/dev/null 2>&1 && has_cmd dockerd; then
+                info "Starting dockerd directly..."
+                sudo dockerd >/dev/null 2>&1 &
+                sleep 3
+            fi
             ;;
         Darwin)
             open -a Docker 2>/dev/null || true
@@ -261,6 +272,13 @@ if ! docker info >/dev/null 2>&1; then
     done
     if ! docker info >/dev/null 2>&1; then
         fail "Docker daemon could not be started after retries"
+        warn "Try starting Docker manually:"
+        if [ "${OS}" = "Linux" ]; then
+            printf "    sudo dockerd > /dev/null 2>&1 &\n"
+            printf "    # then re-run this installer\n"
+        else
+            printf "    Open Docker Desktop application\n"
+        fi
         exit 1
     fi
     success "Docker daemon is now running"

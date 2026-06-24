@@ -48,6 +48,7 @@ COPY crates/ebpf-bpf/Cargo.toml crates/ebpf-bpf/
 COPY crates/ebpf/Cargo.toml crates/ebpf/
 COPY crates/identity/Cargo.toml crates/identity/
 COPY apps/api/Cargo.toml apps/api/
+COPY services/daemon/Cargo.toml services/daemon/
 COPY services/doctor/Cargo.toml services/doctor/
 COPY services/support-bundle/Cargo.toml services/support-bundle/
 
