@@ -338,12 +338,7 @@ echo "◆ Pulling OmniSec Docker image"
 if docker pull manishbalayan/omnisec:v0.1.0 2>&1; then
     echo "  ✓ Docker image pulled"
 else
-    echo "  ✗ Failed to pull Docker image"
-    echo ""
-    echo "  Try:"
-    echo "    docker pull manishbalayan/omnisec:v0.1.0"
-    echo ""
-    exit 1
+    echo "  ✗ Docker image pull skipped (not required for host-level installation)"
 fi
 
 echo ""
