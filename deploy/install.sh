@@ -148,17 +148,31 @@ else
     exit 1
 fi
 
-# Check if Docker daemon is running (skip when running as root in CI)
-if [ "$(id -u)" -ne 0 ]; then
-    if ! docker info &>/dev/null; then
-        echo "  ✗ Docker daemon is not running"
-        echo ""
-        echo "  Start Docker and try again:"
-        echo "    Linux:   sudo systemctl start docker"
-        echo "    macOS:   Open Docker Desktop application"
-        echo ""
-        exit 1
+# Check if Docker CLI exists
+if command -v docker >/dev/null 2>&1; then
+    # If Docker daemon is not reachable, try to start it automatically
+    if ! docker info >/dev/null 2>&1; then
+        echo "  ✗ Docker daemon is not running – attempting automatic start"
+        # Attempt to start Docker based on OS
+        if [ "${OS}" = "Linux" ]; then
+            sudo systemctl start docker || sudo service docker start || true
+        elif [ "${OS}" = "Darwin" ]; then
+            open -a Docker 2>/dev/null || true
+        fi
+        # Retry docker info for up to 120 seconds
+        ATTEMPTS=0
+        while ! docker info >/dev/null 2>&1 && [ $ATTEMPTS -lt 12 ]; do
+            sleep 10
+            ATTEMPTS=$((ATTEMPTS+1))
+        done
+        if ! docker info >/dev/null 2>&1; then
+            echo "  ✗ Docker daemon could not be started after retries"
+            exit 1
+        fi
     fi
+else
+    echo "  ✗ Docker CLI not found – cannot proceed"
+    exit 1
 fi
 
 echo "  ✓ Docker is running"
