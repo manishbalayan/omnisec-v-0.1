@@ -195,7 +195,7 @@ echo ""
 # =============================================================================
 echo "◆ Downloading omnisec-daemon binary"
 
-BINARY_NAME="omnisec-daemon-linux-${BINARY_ARCH}"
+BINARY_NAME="omnisec-daemon-${BINARY_ARCH}"
 BINARY_URL="${DAEMON_BIN_DIR}/${BINARY_NAME}"
 
 if curl -fsSL "${BINARY_URL}" -o /tmp/omnisec-daemon 2>/dev/null; then
@@ -252,8 +252,11 @@ echo ""
 echo "◆ Installing omnisec-daemon"
 
 chmod +x /tmp/omnisec-daemon
-if mv /tmp/omnisec-daemon /usr/local/bin/; then
-    echo "  Installed to /usr/local/bin/omnisec-daemon"
+# Install to user-local bin to avoid sudo
+INSTALL_DIR="$HOME/.local/bin"
+mkdir -p "$INSTALL_DIR"
+if cp /tmp/omnisec-daemon "$INSTALL_DIR/omnisec-daemon"; then
+    echo "  Installed to $INSTALL_DIR/omnisec-daemon"
 else
     echo "  ✗ Failed to install daemon binary"
     exit 1
@@ -266,7 +269,7 @@ echo ""
 # =============================================================================
 echo "◆ Installing and starting omnisec-daemon"
 
-chmod +x /usr/local/bin/omnisec-daemon
+chmod +x "$INSTALL_DIR/omnisec-daemon"
 
 if [ "${OS}" = "Linux" ]; then
     # Linux – use systemd
