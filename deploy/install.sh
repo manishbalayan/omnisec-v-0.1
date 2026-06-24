@@ -65,17 +65,41 @@ fail()    { printf "  ${RED}✗${NC} %s\n" "$1"; }
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # Detect if a port is in use (works on Linux and macOS)
+# Uses actual TCP connection attempt as primary method — more reliable than
+# process listing (lsof needs sudo to see other users' processes on macOS)
 port_in_use() {
     port=$1
+    # Method 1: nc -z — actually tries to connect to the port (most reliable)
+    # Wrap with timeout to prevent hanging on filtered/dropped ports
+    if has_cmd nc; then
+        if has_cmd timeout; then
+            timeout 3 nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0 || return 1
+        else
+            nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0 || return 1
+        fi
+    fi
+    # Method 2: ss — fast, Linux only
     if has_cmd ss; then
         ss -tlnp "sport = :$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
-    elif has_cmd netstat; then
-        netstat -an 2>/dev/null | grep -q "LISTEN.*:$port " && return 0 || return 1
-    elif has_cmd lsof; then
-        lsof -i :"$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
-    else
-        (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null && return 0 || return 1
     fi
+    # Method 3: lsof with sudo fallback (needed on macOS for other users' processes)
+    if has_cmd lsof; then
+        lsof -i :"$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
+        # On macOS, lsof without sudo may miss processes owned by other users
+        if [ "${OS}" = "Darwin" ]; then
+            sudo lsof -i :"$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
+        fi
+    fi
+    # Method 4: netstat
+    if has_cmd netstat; then
+        netstat -an 2>/dev/null | grep -q "LISTEN.*:$port " && return 0 || return 1
+    fi
+    # Method 5: Python socket bind test (most portable fallback)
+    if has_cmd python3; then
+        python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $port)); s.close()" 2>/dev/null && return 1 || return 0
+    fi
+    # Method 6: /dev/tcp (bash-specific, but works on many systems)
+    (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null && return 0 || return 1
 }
 
 # Track in-memory allocated ports to prevent conflicts
