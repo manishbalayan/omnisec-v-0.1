@@ -148,15 +148,17 @@ else
     exit 1
 fi
 
-# Check if Docker daemon is running
-if ! sudo docker info &>/dev/null; then
-    echo "  ✗ Docker daemon is not running"
-    echo ""
-    echo "  Start Docker and try again:"
-    echo "    Linux:   sudo systemctl start docker"
-    echo "    macOS:   Open Docker Desktop application"
-    echo ""
-    exit 1
+# Check if Docker daemon is running (skip when running as root in CI)
+if [ "$(id -u)" -ne 0 ]; then
+    if ! docker info &>/dev/null; then
+        echo "  ✗ Docker daemon is not running"
+        echo ""
+        echo "  Start Docker and try again:"
+        echo "    Linux:   sudo systemctl start docker"
+        echo "    macOS:   Open Docker Desktop application"
+        echo ""
+        exit 1
+    fi
 fi
 
 echo "  ✓ Docker is running"
