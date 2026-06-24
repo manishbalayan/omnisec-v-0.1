@@ -95,7 +95,11 @@
 
 ### Quick Start (Design Partner)
 ```bash
-curl -fsSL https://install.omnisec.ai | sh
+# Current installation method (only supported path):
+curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh
+
+# 🚧 Future install endpoint (not yet available):
+# curl -fsSL https://install.omnisec.ai | sh
 ```
 
 Or run directly:

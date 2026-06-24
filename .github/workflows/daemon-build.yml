@@ -1,16 +1,28 @@
 # =============================================================================
 # OmniSec Daemon Build Pipeline
 # =============================================================================
-# Builds omnisec-daemon release binaries for linux-amd64 and linux-arm64
+# Builds omnisec-daemon release binaries for:
+#   - linux/amd64
+#   - linux/arm64
+#   - macOS (darwin)/amd64 (Intel)
+#   - macOS (darwin)/arm64 (Apple Silicon)
 # and publishes to GitHub Releases.
 #
 # Triggers:
-#   - Push to main branch (every push creates/update Release)
+#   - Push to main branch
+#   - Tag push v* (uses git tag as release tag)
+#   - Manual trigger via GitHub UI (workflow_dispatch)
 #
-# Output:
-#   - linux-amd64 binary: omnisec-daemon-linux-amd64
-#   - linux-arm64 binary: omnisec-daemon-linux-arm64
-#   - SHA256 checksums for both
+# Binary naming convention: omnisec-daemon-{os}-{arch}
+#   Examples:
+#     omnisec-daemon-linux-amd64
+#     omnisec-daemon-linux-arm64
+#     omnisec-daemon-darwin-amd64
+#     omnisec-daemon-darwin-arm64
+#
+# Installer expects binaries WITHOUT os prefix for Linux (default case):
+#   omnisec-daemon-amd64  → symlink/copy of omnisec-daemon-linux-amd64
+#   omnisec-daemon-arm64  → symlink/copy of omnisec-daemon-linux-arm64
 # =============================================================================
 
 name: OmniSec Daemon Build
@@ -18,7 +30,11 @@ name: OmniSec Daemon Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -27,14 +43,30 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux AMD64
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            os_tag: linux
             arch: amd64
-            binary_name: omnisec-daemon-linux-amd64
+            needs_cross: false
+          # Linux ARM64
           - os: ubuntu-24.04-arm64
             target: aarch64-unknown-linux-gnu
+            os_tag: linux
             arch: arm64
-            binary_name: omnisec-daemon-linux-arm64
+            needs_cross: false
+          # macOS Intel (build natively)
+          - os: macos-13
+            target: x86_64-apple-darwin
+            os_tag: darwin
+            arch: amd64
+            needs_cross: false
+          # macOS Apple Silicon (build natively)
+          - os: macos-14
+            target: aarch64-apple-darwin
+            os_tag: darwin
+            arch: arm64
+            needs_cross: false
 
     steps:
       - name: Checkout repository
@@ -47,8 +79,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross toolchain (for arm64)
-        if: matrix.arch == 'arm64'
+      # Install cross toolchain deps
+      - name: Install Linux ARM64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -76,56 +109,97 @@ jobs:
           cd services/daemon
           cargo build --release --bin omnisec-daemon --target ${{ matrix.target }}
 
-      - name: Stripping binary
+      - name: Strip binary (Linux)
+        if: matrix.os_tag == 'linux'
         run: |
           strip target/${{ matrix.target }}/release/omnisec-daemon
+
+      - name: Strip binary (macOS)
+        if: matrix.os_tag == 'darwin'
+        run: |
+          strip target/${{ matrix.target }}/release/omnisec-daemon 2>/dev/null || true
+
+      # Create the final artifact name: omnisec-daemon-{os_tag}-{arch}
+      - name: Rename binary for artifact
+        run: |
+          mkdir -p /tmp/artifacts/${{ matrix.os_tag }}-${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/omnisec-daemon \
+            /tmp/artifacts/${{ matrix.os_tag }}-${{ matrix.arch }}/omnisec-daemon-${{ matrix.os_tag }}-${{ matrix.arch }}
+          # Also create a platform-agnostic alias for Linux (no os_tag prefix)
+          # so the installer can use omnisec-daemon-amd64 / omnisec-daemon-arm64
+          if [ "${{ matrix.os_tag }}" = "linux" ]; then
+            cp target/${{ matrix.target }}/release/omnisec-daemon \
+              /tmp/artifacts/${{ matrix.os_tag }}-${{ matrix.arch }}/omnisec-daemon-${{ matrix.arch }}
+          fi
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.binary_name }}
-          path: target/${{ matrix.target }}/release/omnisec-daemon
+          name: omnisec-daemon-${{ matrix.os_tag }}-${{ matrix.arch }}
+          path: /tmp/artifacts/${{ matrix.os_tag }}-${{ matrix.arch }}/*
           retention-days: 30
 
   package:
     name: "Package and Release"
     runs-on: ubuntu-24.04
     needs: build
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.set_tag.outputs.tag }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: set_tag
+        run: |
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v0.1.0-daemon"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
+      - name: Organize artifacts
+        run: |
+          mkdir -p ./release-assets
+          # Find and copy all binary files to release-assets/
+          find ./artifacts -type f -name 'omnisec-daemon-*' -exec cp {} ./release-assets/ \;
+          echo "=== Release assets ==="
+          ls -la ./release-assets/
+
       - name: Generate SHA256 checksums
         run: |
-          cd artifacts
-          sha256sum omnisec-daemon-linux-amd64 > omnisec-daemon-linux-amd64.sha256
-          sha256sum omnisec-daemon-linux-arm64 > omnisec-daemon-linux-arm64.sha256
+          cd release-assets
+          for f in omnisec-daemon-*; do
+            if [[ ! "$f" =~ \.sha256$ ]]; then
+              sha256sum "$f" > "$f.sha256"
+              echo "Generated: $f.sha256"
+            fi
+          done
 
       - name: Display checksums
         run: |
-          echo "=== AMD64 Checksum ==="
-          cat artifacts/omnisec-daemon-linux-amd64.sha256
-          echo ""
-          echo "=== ARM64 Checksum ==="
-          cat artifacts/omnisec-daemon-linux-arm64.sha256
+          echo "=== All Checksums ==="
+          cat release-assets/*.sha256
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v0.1.0-daemon
-          name: OmniSec Daemon Binary Release
+          tag_name: ${{ steps.set_tag.outputs.tag }}
+          name: OmniSec Daemon ${{ steps.set_tag.outputs.tag }}
           draft: false
           prerelease: false
           files: |
-            artifacts/omnisec-daemon-linux-amd64
-            artifacts/omnisec-daemon-linux-amd64.sha256
-            artifacts/omnisec-daemon-linux-arm64
-            artifacts/omnisec-daemon-linux-arm64.sha256
+            release-assets/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

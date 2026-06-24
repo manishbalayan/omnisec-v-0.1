@@ -14,33 +14,49 @@ Omnisec sits below AI agents and their harnesses at the operating system and net
 
 ## Quick Start
 
-### Prerequisites
-
-- Docker
-
-### Installation
+### Current Installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh
 ```
 
-This will pull the all-in-one image, create a persistent data volume, and start all services automatically.
+This single command:
+1. Detects your OS and architecture
+2. Downloads the correct pre-built binary from GitHub Releases
+3. Verifies the SHA256 checksum
+4. Installs the daemon with systemd (Linux) or launchd (macOS)
+5. Starts the daemon and Docker control plane stack
+6. Verifies all services
+7. Prints access URLs
 
-### Or run directly
+No Rust, Cargo, or compilation required.
+
+### Prerequisites
+
+- **curl** (pre-installed on most systems)
+- **Docker** (Desktop on macOS, engine on Linux)
+  - Linux: `curl -fsSL https://get.docker.com | sh`
+  - macOS: https://docs.docker.com/desktop/install/mac-install/
+
+### Platform Support
+
+| Platform | Architecture | Support |
+|----------|-------------|---------|
+| Linux | x86_64 (amd64) | ✅ |
+| Linux | aarch64 (arm64) | ✅ |
+| macOS Intel | x86_64 (amd64) | ⚠️ Pre-release — binaries available, testing ongoing |
+| macOS Apple Silicon | aarch64 (arm64) | ⚠️ Pre-release — binaries available, testing ongoing |
+
+### Future Installation Endpoint (Planned)
+
+A dedicated install endpoint at `https://install.omnisec.ai` is planned for a future release.
 
 ```bash
-docker run -d \
-  --name omnisec \
-  -p 3000:3000 \
-  -v omnisec_data:/var/lib/omnisec \
-  --restart unless-stopped \
-  --cap-add SYS_PTRACE \
-  --cap-add NET_ADMIN \
-  --cap-add DAC_READ_SEARCH \
-  omnisec/omnisec
+# 🚧 NOT YET AVAILABLE — this is a future roadmap goal
+# curl -fsSL https://install.omnisec.ai | sh
 ```
 
-Then open **http://localhost:3000** in your browser.
+The current installation method using the GitHub raw URL (above) is the only supported installation path today.
 
 ### Development
 
