@@ -186,6 +186,13 @@ if [ -d "/opt/omnisec-dashboard/.next" ]; then
         sed -i "s|$PLACEHOLDER|$REPLACEMENT|g" "$file"
     done
     echo "[omnisec] ✓ Dashboard API URL patched → ${REPLACEMENT}"
+
+    # Also patch the API key placeholder so the dashboard can authenticate
+    API_KEY_PLACEHOLDER="omnisec-placeholder-key"
+    grep -rl "$API_KEY_PLACEHOLDER" /opt/omnisec-dashboard/.next 2>/dev/null | while read -r file; do
+        sed -i "s|$API_KEY_PLACEHOLDER|$OMNISEC_API_KEY|g" "$file"
+    done
+    echo "[omnisec] ✓ Dashboard API key patched → ${OMNISEC_API_KEY:0:20}..."
 fi
 
 # =============================================================================

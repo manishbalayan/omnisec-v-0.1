@@ -117,6 +117,7 @@ COPY apps/dashboard/ .
 # Use a recognizable placeholder that the entrypoint will replace at startup
 # with the actual port (from OMNISEC_API_EXTERNAL_PORT env var)
 ENV NEXT_PUBLIC_API_URL="http://omnisec-api-placeholder:3002"
+ENV NEXT_PUBLIC_API_KEY="omnisec-placeholder-key"
 
 RUN npm run build
 

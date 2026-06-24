@@ -56,10 +56,12 @@ export default function ValidationPage() {
   async function fetchData() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || ''
+      const headers = { 'X-API-Key': apiKey }
       
       const [eventsRes, agentsRes] = await Promise.all([
-        fetch(`${apiUrl}/api/events`),
-        fetch(`${apiUrl}/api/agents`)
+        fetch(`${apiUrl}/api/events`, { headers }),
+        fetch(`${apiUrl}/api/agents`, { headers })
       ])
       
       const eventsData = await eventsRes.json()

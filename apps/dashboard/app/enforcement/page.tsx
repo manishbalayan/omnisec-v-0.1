@@ -130,15 +130,17 @@ export default function EnforcementDashboard() {
   async function fetchAllData() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || ''
+      const headers = { 'X-API-Key': apiKey }
 
       const [decisionsRes, actionsRes, incidentsRes, statsRes, blockRes, allowRes, overridesRes] = await Promise.all([
-        fetch(`${apiUrl}/api/enforcement/decisions`),
-        fetch(`${apiUrl}/api/enforcement/actions`),
-        fetch(`${apiUrl}/api/enforcement/incidents`),
-        fetch(`${apiUrl}/api/enforcement/stats`),
-        fetch(`${apiUrl}/api/enforcement/lists/block`),
-        fetch(`${apiUrl}/api/enforcement/lists/allow`),
-        fetch(`${apiUrl}/api/enforcement/overrides`),
+        fetch(`${apiUrl}/api/enforcement/decisions`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/actions`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/incidents`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/stats`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/lists/block`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/lists/allow`, { headers }),
+        fetch(`${apiUrl}/api/enforcement/overrides`, { headers }),
       ])
 
       if (decisionsRes.ok) { const d = await decisionsRes.json(); setDecisions(d.decisions || []) }

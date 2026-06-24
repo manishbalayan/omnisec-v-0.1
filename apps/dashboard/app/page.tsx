@@ -33,10 +33,12 @@ export default function Home() {
   async function fetchData() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || ''
+      const headers = { 'X-API-Key': apiKey }
       
       const [agentsRes, eventsRes] = await Promise.all([
-        fetch(`${apiUrl}/api/agents`),
-        fetch(`${apiUrl}/api/events`)
+        fetch(`${apiUrl}/api/agents`, { headers }),
+        fetch(`${apiUrl}/api/events`, { headers })
       ])
       
       const agentsData = await agentsRes.json()

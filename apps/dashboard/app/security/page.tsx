@@ -170,14 +170,16 @@ export default function SecurityDashboard() {
   async function fetchAllData() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || ''
+      const headers = { 'X-API-Key': apiKey }
 
       const [riskRes, anomalyRes, opsRes, timelineRes, correlationRes, incidentRes] = await Promise.all([
-        fetch(`${apiUrl}/api/security/risk-scores`),
-        fetch(`${apiUrl}/api/security/anomalies`),
-        fetch(`${apiUrl}/api/security/operations`),
-        fetch(`${apiUrl}/api/security/timeline`),
-        fetch(`${apiUrl}/api/security/correlation`),
-        fetch(`${apiUrl}/api/security/incidents`),
+        fetch(`${apiUrl}/api/security/risk-scores`, { headers }),
+        fetch(`${apiUrl}/api/security/anomalies`, { headers }),
+        fetch(`${apiUrl}/api/security/operations`, { headers }),
+        fetch(`${apiUrl}/api/security/timeline`, { headers }),
+        fetch(`${apiUrl}/api/security/correlation`, { headers }),
+        fetch(`${apiUrl}/api/security/incidents`, { headers }),
       ])
 
       if (riskRes.ok) {

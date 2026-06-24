@@ -57,12 +57,14 @@ export default function ReliabilityDashboard() {
   async function fetchData() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || ''
+      const headers = { 'X-API-Key': apiKey }
       
       const [agentsRes, incidentsRes, metricsRes, depsRes] = await Promise.all([
-        fetch(`${apiUrl}/api/agents`),
-        fetch(`${apiUrl}/api/incidents`),
-        fetch(`${apiUrl}/api/metrics/reliability`),
-        fetch(`${apiUrl}/api/dependencies/health`)
+        fetch(`${apiUrl}/api/agents`, { headers }),
+        fetch(`${apiUrl}/api/incidents`, { headers }),
+        fetch(`${apiUrl}/api/metrics/reliability`, { headers }),
+        fetch(`${apiUrl}/api/dependencies/health`, { headers })
       ])
       
       if (agentsRes.ok) {
