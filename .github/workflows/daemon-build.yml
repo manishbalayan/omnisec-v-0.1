@@ -116,7 +116,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v0.1.0-daemon-${{ github.sha }}
+          tag_name: v0.1.0-daemon
           name: OmniSec Daemon Binary Release
           draft: false
           prerelease: false
