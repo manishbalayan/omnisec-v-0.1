@@ -69,7 +69,7 @@ impl Storage {
         Ok(org_id)
     }
 
-    pub async fn create_agent(&self, name: &str, pid: Option<i32>) -> Result<Uuid> {
+    pub async fn create_agent(&self, name: &str, pid: Option<i32>, confidence: Option<i32>) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
@@ -78,12 +78,13 @@ impl Storage {
         }
 
         sqlx::query(
-            "INSERT INTO agents (id, organization_id, name, pid, status, created_at, updated_at) VALUES ($1, $2, $3, $4, 'unknown', $5, $6)"
+            "INSERT INTO agents (id, organization_id, name, pid, confidence, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'unknown', $6, $7)"
         )
         .bind(id)
         .bind(self.default_org_id)
         .bind(name)
         .bind(pid)
+        .bind(confidence.unwrap_or(0))
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -125,7 +126,7 @@ impl Storage {
 
     pub async fn get_agents(&self) -> Result<Vec<serde_json::Value>> {
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT row_to_json(t)::text FROM (SELECT * FROM agents ORDER BY created_at DESC) t"
+            "SELECT row_to_json(t)::text FROM (SELECT * FROM agents WHERE confidence > 0 ORDER BY created_at DESC) t"
         )
         .fetch_all(&self.pool)
         .await?;

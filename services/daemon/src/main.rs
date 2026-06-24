@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
                         // Persist new agents to database (only on first discovery)
                         if !stored_agents.contains_key(&agent.pid) {
                             if let Some(ref store) = discovery_storage {
-                                match store.create_agent(&agent.name, Some(agent.pid as i32)).await {
+                                match store.create_agent(&agent.name, Some(agent.pid as i32), Some(agent.confidence as i32)).await {
                                     Ok(agent_id) => {
                                         stored_agents.insert(agent.pid, agent_id);
                                         tracing::info!("Stored agent {} (PID: {}) in database", agent.name, agent.pid);
