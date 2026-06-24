@@ -63,6 +63,17 @@ jobs:
           sudo systemctl daemon-reload 2>/dev/null || true
 
       # =========================================================================
+      # Start Docker daemon (required on GitHub Actions ubuntu runner)
+      # =========================================================================
+      - name: Start Docker daemon
+        run: |
+          sudo service docker restart || true
+          sleep 10
+          sudo docker info > /dev/null 2>&1 && echo "✓ Docker daemon running" || (echo "✗ Docker daemon not running" && exit 1)
+          docker ps
+          docker info | head -20
+
+      # =========================================================================
       # Phase 1: Run the OmniSec installer (host-level daemon + Docker stack)
       # =========================================================================
       - name: Run OmniSec Installer
@@ -70,6 +81,10 @@ jobs:
           echo "=== PHASE 1: INSTALLATION ==="
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | sudo -E sh
           echo "✓ Phase 1 complete - Installer executed"
+          # Ensure Docker is healthy before proceeding
+          echo "Waiting for Docker to be fully ready..."
+          sleep 5
+          docker info | head -10
           # Daemon health check
           sudo systemctl status omnisec-daemon
           curl -fs http://localhost:3003/health

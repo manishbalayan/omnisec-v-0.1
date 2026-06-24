@@ -149,7 +149,7 @@ else
 fi
 
 # Check if Docker daemon is running
-if ! docker info &>/dev/null; then
+if ! sudo docker info &>/dev/null; then
     echo "  ✗ Docker daemon is not running"
     echo ""
     echo "  Start Docker and try again:"
