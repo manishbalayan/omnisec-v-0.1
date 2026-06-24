@@ -380,7 +380,7 @@ impl AgentDiscovery {
 
         // Signal 1: Process name contains agent-related keywords (+25)
         let comm_lower = comm.to_lowercase();
-        let agent_keywords = ["agent", "bot", "assistant", "ai-", "llm", "model", "crew"];
+        let agent_keywords = ["agent", "bot", "assistant", "ai-", "llm", "model", "crew", "codebuff"];
         if agent_keywords.iter().any(|k| comm_lower.contains(k)) {
             score = score.saturating_add(25);
         }

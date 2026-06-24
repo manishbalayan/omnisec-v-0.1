@@ -146,7 +146,16 @@ async fn main() -> Result<()> {
             tracing::debug!("Discovery cycle {}", cycle);
 
             match discovery.discover_agents() {
-                Ok(agents) => {
+                Ok(all_agents) => {
+                    // Only publish agents with a minimum confidence threshold.
+                    // This filters out infrastructure processes (postgres, nats, kernel
+                    // threads, bash, etc.) that have no AI agent indicators.
+                    let min_confidence = 20u8;
+                    let agents: Vec<_> = all_agents
+                        .into_iter()
+                        .filter(|a| a.confidence >= min_confidence)
+                        .collect();
+
                     for agent in &agents {
                         // Persist new agents to database (only on first discovery)
                         if !stored_agents.contains_key(&agent.pid) {
@@ -184,7 +193,11 @@ async fn main() -> Result<()> {
                     }
 
                     if !agents.is_empty() {
-                        tracing::info!("Published {} AgentDiscovered events", agents.len());
+                        tracing::info!(
+                            "Published {} AgentDiscovered events (min confidence={})",
+                            agents.len(),
+                            min_confidence,
+                        );
                     }
                 }
                 Err(e) => {
