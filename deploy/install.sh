@@ -702,6 +702,41 @@ fi
 if [ "$IMAGE_SOURCE" = "none" ]; then
     warn "Continuing with host daemon only (no Docker control plane)"
 else
+    # =========================================================================
+    # Extract the real daemon binary from the freshly-built Docker image
+    # This replaces any placeholder/stub binary (e.g. 12-byte GitHub release
+    # assets from a CI that never ran) with the properly compiled binary.
+    # =========================================================================
+    info "Extracting real daemon binary from Docker image..."
+    docker rm -f omnisec-temp >/dev/null 2>&1 || true
+    docker create --name omnisec-temp manishbalayan/omnisec:v0.1.0 >/dev/null 2>&1 || true
+    docker cp omnisec-temp:/usr/local/bin/omnisec-daemon "${TMP_DIR}/omnisec-daemon-real" >/dev/null 2>&1 || true
+    docker rm omnisec-temp >/dev/null 2>&1 || true
+    if [ -s "${TMP_DIR}/omnisec-daemon-real" ]; then
+        REAL_SIZE=$(file_size_bytes "${TMP_DIR}/omnisec-daemon-real")
+        if [ "$REAL_SIZE" -gt 1000000 ] 2>/dev/null; then
+            sudo cp "${TMP_DIR}/omnisec-daemon-real" "${DAEMON_BIN}"
+            sudo chmod 755 "${DAEMON_BIN}"
+            success "Real daemon binary (${REAL_SIZE} bytes) installed from Docker image"
+            # Restart host daemon with the real binary
+            case "${OS}" in
+                Linux)
+                    if systemctl is-enabled omnisec-daemon >/dev/null 2>&1; then
+                        sudo systemctl start omnisec-daemon 2>/dev/null || true
+                    fi
+                    ;;
+                Darwin)
+                    sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
+                    ;;
+            esac
+        else
+            warn "Extracted binary is only ${REAL_SIZE} bytes — keeping existing binary"
+        fi
+    else
+        warn "Could not extract daemon binary from Docker image"
+    fi
+    printf "\n"
+
     # Build docker run command as a shell string (POSIX-compatible, no arrays)
     DOCKER_CMD="docker run --name omnisec"
     DOCKER_CMD="${DOCKER_CMD} -p 127.0.0.1:${DASHBOARD_PORT}:3000"
