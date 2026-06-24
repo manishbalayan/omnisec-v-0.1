@@ -218,43 +218,54 @@ if ! has_cmd curl; then
 fi
 success "curl found"
 
-# Check Docker
-if has_cmd docker; then
-    DOCKER_VERSION=$(docker --version 2>/dev/null || printf "Docker CLI")
-    success "${DOCKER_VERSION}"
-
-    # Check if Docker daemon is running
-    if ! docker info >/dev/null 2>&1; then
-        warn "Docker daemon is not running — attempting to start"
-        case "${OS}" in
-            Linux)
-                sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
-                ;;
-            Darwin)
-                open -a Docker 2>/dev/null || true
-                warn "If Docker Desktop doesn't start automatically, open it manually"
-                ;;
-        esac
-
-        info "Waiting for Docker daemon (up to 120s)..."
-        attempt=0
-        while ! docker info >/dev/null 2>&1 && [ "$attempt" -lt 12 ]; do
-            sleep 10
-            attempt=$((attempt + 1))
-        done
-        if ! docker info >/dev/null 2>&1; then
-            fail "Docker daemon could not be started after retries"
+# Auto-install Docker if not found (Linux only)
+if ! has_cmd docker; then
+    if [ "${OS}" = "Linux" ]; then
+        info "Docker not found — installing via get.docker.com..."
+        curl -fsSL https://get.docker.com | sh 2>&1 || {
+            fail "Docker installation failed. Install manually:"
+            printf "    curl -fsSL https://get.docker.com | sh\n"
             exit 1
-        fi
-        success "Docker daemon is now running"
+        }
+        success "Docker installed"
     else
-        success "Docker daemon is running"
+        fail "Docker not found. Install Docker Desktop first:"
+        printf "    https://docs.docker.com/desktop/install/mac-install/\n"
+        exit 1
     fi
+fi
+
+# Now check Docker daemon status
+DOCKER_VERSION=$(docker --version 2>/dev/null || printf "Docker CLI")
+success "${DOCKER_VERSION}"
+
+if ! docker info >/dev/null 2>&1; then
+    warn "Docker daemon is not running — attempting to start"
+    case "${OS}" in
+        Linux)
+            # Need to start dockerd if just installed
+            sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || \
+                (sudo dockerd >/dev/null 2>&1 &)
+            ;;
+        Darwin)
+            open -a Docker 2>/dev/null || true
+            warn "If Docker Desktop doesn't start automatically, open it manually"
+            ;;
+    esac
+
+    info "Waiting for Docker daemon (up to 120s)..."
+    attempt=0
+    while ! docker info >/dev/null 2>&1 && [ "$attempt" -lt 12 ]; do
+        sleep 10
+        attempt=$((attempt + 1))
+    done
+    if ! docker info >/dev/null 2>&1; then
+        fail "Docker daemon could not be started after retries"
+        exit 1
+    fi
+    success "Docker daemon is now running"
 else
-    fail "Docker not found. Install Docker first:"
-    printf "    Linux:   curl -fsSL https://get.docker.com | sh\n"
-    printf "    macOS:   https://docs.docker.com/desktop/install/mac-install/\n"
-    exit 1
+    success "Docker daemon is running"
 fi
 printf "\n"
 
@@ -584,19 +595,46 @@ if docker pull manishbalayan/omnisec:v0.1.0 2>/dev/null; then
     success "Docker image pulled from Docker Hub"
 else
     warn "Docker Hub image not found (manishbalayan/omnisec:v0.1.0)"
-    info "Attempting to build from local source..."
+    info "Attempting to build from source..."
+
+    # Try local build first (when running from a cloned repo)
+    BUILD_DIR=""
     if [ -f "deploy/Dockerfile.all-in-one" ]; then
-        docker build -t manishbalayan/omnisec:v0.1.0 -f deploy/Dockerfile.all-in-one . 2>&1 && {
+        BUILD_DIR="$(pwd -P 2>/dev/null || pwd)"
+        info "Building from local source at ${BUILD_DIR}"
+    else
+        # When piped (curl | sh), clone the repo to a temp directory
+        info "No local source found — cloning repository..."
+        BUILD_DIR="${TMP_DIR}/omnisec-repo"
+        if has_cmd git; then
+            git clone --depth 1 "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" "${BUILD_DIR}" 2>/dev/null && {
+                info "Repository cloned to ${BUILD_DIR}"
+            } || {
+                warn "Failed to clone repository — skipping Docker control plane"
+                BUILD_DIR=""
+            }
+        else
+            warn "git not found — cannot clone repository"
+            warn "Install git or clone manually: git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+            BUILD_DIR=""
+        fi
+    fi
+
+    if [ -n "$BUILD_DIR" ] && [ -f "${BUILD_DIR}/deploy/Dockerfile.all-in-one" ]; then
+        info "Building Docker image (this may take 5-10 minutes)..."
+        docker build -t manishbalayan/omnisec:v0.1.0 \
+            -f "${BUILD_DIR}/deploy/Dockerfile.all-in-one" \
+            "${BUILD_DIR}" 2>&1 && {
             success "Docker image built from source"
             IMAGE_SOURCE="local"
         } || {
             warn "Local build failed — skipping Docker control plane"
-            warn "Install the daemon only: the host daemon is installed at ${DAEMON_BIN}"
+            warn "The host daemon is still installed at ${DAEMON_BIN}"
             IMAGE_SOURCE="none"
         }
     else
-        warn "No Dockerfile found at deploy/Dockerfile.all-in-one — cannot build locally"
-        info "Clone the repo first: git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+        warn "Cannot build Docker image — skipping Docker control plane"
+        warn "The host daemon is still installed at ${DAEMON_BIN}"
         IMAGE_SOURCE="none"
     fi
 fi
