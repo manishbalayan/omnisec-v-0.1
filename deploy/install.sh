@@ -250,11 +250,15 @@ fi
 echo ""
 
 # =============================================================================
-# Step 6: Create systemd service
-# ============================================================================
-echo "◆ Setting up systemd service"
+# Step 6: Install and start omnisec-daemon
+# =============================================================================
+echo "◆ Installing and starting omnisec-daemon"
 
-cat > /etc/systemd/system/omnisec-daemon.service << EOF
+chmod +x /usr/local/bin/omnisec-daemon
+
+if [ "${OS}" = "Linux" ]; then
+    # Linux – use systemd
+    cat > /etc/systemd/system/omnisec-daemon.service << EOF
 [Unit]
 Description=OmniSec Daemon - Host-level Process Monitoring
 After=network-online.target
@@ -274,31 +278,15 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl daemon-reload
-
-echo "  ✓ Systemd service created"
-echo ""
-
-# =============================================================================
-# Step 7: Start daemon
-# ============================================================================
-echo "◆ Starting omnisec-daemon service"
-
-if systemctl enable omnisec-daemon; then
-    echo "  ✓ Daemon enabled for auto-start"
+    systemctl daemon-reload
+    systemctl enable omnisec-daemon
+    systemctl start omnisec-daemon
+    echo "  ✓ Systemd service created and daemon started"
 else
-    echo "  ✗ Failed to enable daemon service"
-    exit 1
-fi
-
-if systemctl start omnisec-daemon; then
-    echo "  ✓ Daemon started"
-else
-    echo "  ✗ Failed to start daemon service"
-    echo ""
-    echo "  Check logs: systemctl status omnisec-daemon"
-    exit 1
+    # macOS – run daemon in background
+    /usr/local/bin/omnisec-daemon &
+    DAEMON_PID=$!
+    echo "  ✓ OmniSec daemon started in background (PID $DAEMON_PID)"
 fi
 
 # Wait for daemon to be ready
@@ -306,19 +294,18 @@ echo ""
 echo "◆ Waiting for daemon to be ready..."
 TIMEOUT=30
 ELAPSED=0
-while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
-    if systemctl is-active --quiet omnisec-daemon; then
-        # Check if daemon is responding on health port
-        if nc -z localhost 3003 2>/dev/null; then
-            echo "  ✓ OmniSec Daemon is ready!"
-            break
-        fi
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    if [ "${OS}" = "Linux" ]; then
+        systemctl is-active --quiet omnisec-daemon && nc -z localhost 3003 2>/dev/null && echo "  ✓ OmniSec Daemon is ready!" && break
+    else
+        ps -p $DAEMON_PID >/dev/null && nc -z localhost 3003 2>/dev/null && echo "  ✓ OmniSec Daemon is ready!" && break
     fi
     sleep 1
     ELAPSED=$((ELAPSED + 1))
     echo -n "."
 done
-echo ""
+
+echo ""echo ""
 
 if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
     echo "  ⚠ Daemon may still be starting..."
