@@ -79,7 +79,32 @@ impl NetworkBlockEngine {
                     };
                 }
 
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
+                {
+                    let ok = std::process::Command::new("pfctl")
+                        .args(["-a", "omnisec", "-f", "/etc/pf.anchors/omnisec"])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+
+                    self.rules.push(NftablesRule {
+                        id: Uuid::new_v4(),
+                        target: domain.to_string(),
+                        ip: None,
+                        rule_type: BlockType::Domain,
+                        created_at: chrono::Utc::now(),
+                        expires_at: None,
+                        reason: reason.to_string(),
+                    });
+
+                    return RuntimeAction {
+                        result: if ok { "Applied".to_string() } else { "Failed".to_string() },
+                        verified: ok,
+                        ..action
+                    };
+                }
+
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 {
                     self.rules.push(NftablesRule {
                         id: Uuid::new_v4(),
@@ -127,7 +152,21 @@ impl NetworkBlockEngine {
             RuntimeMode::Native => {
                 #[cfg(target_os = "linux")]
                 let verified = self.apply_nftables_ip_rule(ip);
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(target_os = "macos")]
+                let verified = {
+                    // Write rule to anchor file and reload
+                    let rule = format!("block drop out quick proto {{ tcp udp }} from any to {}\n", ip);
+                    let _ = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open("/etc/pf.anchors/omnisec")
+                        .map(|mut f| { use std::io::Write; f.write_all(rule.as_bytes()) });
+                    std::process::Command::new("pfctl")
+                        .args(["-a", "omnisec", "-f", "/etc/pf.anchors/omnisec"])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                };
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 let verified = true;
 
                 self.rules.push(NftablesRule {
@@ -179,6 +218,18 @@ impl NetworkBlockEngine {
                     // nft add rule inet omnisec omnisec-block ip daddr <cidr> drop
                     let _ = std::process::Command::new("nft")
                         .args(&["add", "rule", "inet", "omnisec", "omnisec-block", "ip", "daddr", cidr, "drop"])
+                        .output();
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    let rule = format!("block drop out quick proto {{ tcp udp }} from any to {}\n", cidr);
+                    let _ = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open("/etc/pf.anchors/omnisec")
+                        .map(|mut f| { use std::io::Write; f.write_all(rule.as_bytes()) });
+                    let _ = std::process::Command::new("pfctl")
+                        .args(["-a", "omnisec", "-f", "/etc/pf.anchors/omnisec"])
                         .output();
                 }
 
@@ -265,7 +316,7 @@ impl NetworkBlockEngine {
         action
     }
 
-    /// Set up the nftables table and chain on first use
+    /// Set up the firewall table/anchor on first use.
     pub fn initialize_table(&self) {
         #[cfg(target_os = "linux")]
         {
@@ -275,6 +326,18 @@ impl NetworkBlockEngine {
 
             let _ = std::process::Command::new("nft")
                 .args(&["add", "chain", "inet", "omnisec", "omnisec-block", "{ type filter hook output priority 0; policy accept; }"])
+                .output();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // Ensure PF anchor file exists.
+            if !std::path::Path::new("/etc/pf.anchors/omnisec").exists() {
+                let _ = std::fs::write("/etc/pf.anchors/omnisec", "# omnisec PF anchor\n");
+            }
+            let _ = std::process::Command::new("pfctl").args(["-e"]).output();
+            let _ = std::process::Command::new("pfctl")
+                .args(["-a", "omnisec", "-f", "/etc/pf.anchors/omnisec"])
                 .output();
         }
     }

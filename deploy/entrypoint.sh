@@ -82,7 +82,7 @@ if [ ! -f "${POSTGRES_DATA}/PG_VERSION" ]; then
 
     # Configure PostgreSQL
     cat >> "${POSTGRES_DATA}/postgresql.conf" <<-EOCONF
-listen_addresses = 'localhost'
+listen_addresses = '*'
 port = 5432
 unix_socket_directories = '/var/run/postgresql'
 max_connections = 50
@@ -92,6 +92,14 @@ EOCONF
     echo "[omnisec] ✓ PostgreSQL initialized"
 else
     echo "[omnisec] ✓ PostgreSQL data directory exists"
+fi
+
+# Always ensure PostgreSQL accepts external connections (for host daemon)
+if [ -f "${POSTGRES_DATA}/postgresql.conf" ]; then
+    sed -i "s/^listen_addresses = .*/listen_addresses = '*'/" "${POSTGRES_DATA}/postgresql.conf"
+fi
+if ! grep -q "0.0.0.0/0" "${POSTGRES_DATA}/pg_hba.conf" 2>/dev/null; then
+    echo "host all all 0.0.0.0/0 md5" >> "${POSTGRES_DATA}/pg_hba.conf"
 fi
 
 # =============================================================================

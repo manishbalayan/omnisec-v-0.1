@@ -32,6 +32,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod platform;
+
 struct DaemonState {
     agent_count: usize,
     alive_count: usize,
@@ -47,6 +49,12 @@ struct DesignPartnerConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Early-exit for binary verification and install scripts.
+    if std::env::args().any(|a| a == "--version") {
+        println!("omnisec-daemon 0.2.0 ({})", platform::platform_id());
+        return Ok(());
+    }
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -55,7 +63,10 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Starting Omnisec Daemon v0.2.0 (event-driven)");
+    tracing::info!(
+        "Starting Omnisec Daemon v0.2.0 (event-driven) on {}",
+        platform::platform_id()
+    );
 
     // --- NATS connection ---
     let nats_url = std::env::var("NATS_URL")
@@ -1909,10 +1920,11 @@ async fn main() -> Result<()> {
 
     // Keep the main task alive, sending watchdog pings
     tracing::info!("Omnisec Daemon running. Waiting for events...");
+    platform::notify_ready();
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         if watchdog_interval.is_some() {
-            sd_notify("WATCHDOG=1\n");
+            platform::notify_watchdog();
         }
     }
 }
@@ -1934,61 +1946,14 @@ async fn health_handler(state: Arc<RwLock<DaemonState>>) -> Json<Value> {
     }))
 }
 
-/// Send a systemd notification via the NOTIFY_SOCKET unix datagram socket.
-fn sd_notify(state: &str) {
-    if let Ok(socket_path) = std::env::var("NOTIFY_SOCKET") {
-        use std::os::unix::net::UnixDatagram;
-        if let Ok(sock) = UnixDatagram::unbound() {
-            let _ = sock.send_to(state.as_bytes(), &socket_path);
-        }
-    }
-}
-
-/// Return the proc mount path, checking /host/proc first for Docker deployments.
-fn proc_root() -> &'static str {
-    if std::path::Path::new("/host/proc").exists() {
-        "/host/proc"
-    } else {
-        "/proc"
-    }
-}
-
-/// Read /proc/[pid]/cmdline and return as a space-joined command string.
+/// Read /proc/[pid]/cmdline or sysctl KERN_PROCARGS2 depending on platform.
 fn read_proc_cmdline(pid: u32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let proc = proc_root();
-        let content = std::fs::read(format!("{}/{}/cmdline", proc, pid)).ok()?;
-        // cmdline is NUL-separated
-        let args: Vec<String> = content
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).to_string())
-            .collect();
-        if args.is_empty() { return None; }
-        Some(args.join(" "))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        None
-    }
+    platform::read_cmdline(pid)
 }
 
-/// Check if a process is alive by sending signal 0 (no-op probe).
+/// Check if a process is alive using a POSIX signal-0 probe.
 fn alive_check(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // Safety: signal 0 is a no-op that only checks process existence
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        // Fallback: check proc entry existence
-        let proc = proc_root();
-        std::path::Path::new(&format!("{}/{}", proc, pid)).exists()
-    }
+    platform::pid_alive(pid)
 }
 
 /// Spawn a process from a command string. Returns the new PID on success.

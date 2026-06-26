@@ -128,20 +128,22 @@ find_free_port() {
     return 1
 }
 
-# Platform-specific checksum verification
+# Platform-specific checksum verification.
+# Each binary ships with a single-line .sha256 file: "<hash>  <binary_name>"
+# We take the first field of the first line — no filename grep needed.
 verify_checksum() {
     file=$1
     checksum_file=$2
 
     if has_cmd sha256sum; then
         ACTUAL_CHECKSUM=$(sha256sum "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(grep "omnisec-daemon" "$checksum_file" | head -1 | awk '{print $1}')
+        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
     elif has_cmd shasum; then
         ACTUAL_CHECKSUM=$(shasum -a 256 "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(grep "omnisec-daemon" "$checksum_file" | head -1 | awk '{print $1}')
+        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
     elif has_cmd gsha256sum; then
         ACTUAL_CHECKSUM=$(gsha256sum "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(grep "omnisec-daemon" "$checksum_file" | head -1 | awk '{print $1}')
+        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
     else
         warn "No checksum tool found (tried sha256sum, shasum, gsha256sum)"
         return 1
@@ -150,6 +152,9 @@ verify_checksum() {
     if [ -n "$STATED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$STATED_CHECKSUM" ]; then
         return 0
     else
+        warn "Checksum mismatch"
+        warn "  Expected: ${STATED_CHECKSUM}"
+        warn "  Got:      ${ACTUAL_CHECKSUM}"
         return 1
     fi
 }
@@ -535,7 +540,14 @@ SERVICE_EOF
 </plist>
 PLIST_EOF
 
-            sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist
+            # macOS 12+ (Monterey): launchctl bootstrap; older: launchctl load
+            _macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+            if [ "${_macos_major:-0}" -ge 12 ] 2>/dev/null; then
+                sudo launchctl bootstrap system /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || \
+                    sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist
+            else
+                sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist
+            fi
             success "Launchd plist created and daemon started"
             ;;
     esac
@@ -726,7 +738,13 @@ else
                     fi
                     ;;
                 Darwin)
-                    sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
+                    _macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+                    if [ "${_macos_major:-0}" -ge 12 ] 2>/dev/null; then
+                        sudo launchctl bootstrap system /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || \
+                            sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
+                    else
+                        sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
+                    fi
                     ;;
             esac
         else
@@ -810,27 +828,47 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$"; then
     API_KEY=$(docker exec omnisec cat /var/lib/omnisec/.api_key 2>/dev/null || printf "")
 fi
 
-# 11a. Verify API
+# 11a. Verify API (with retries — container may still be starting)
 if [ -n "$API_KEY" ]; then
-    info "Verifying API..."
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ${API_KEY}" "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || printf "000")
-    if [ "$HTTP_CODE" = "200" ]; then
+    info "Verifying API (up to 30s)..."
+    _api_ok=false
+    _api_attempt=1
+    while [ $_api_attempt -le 15 ]; do
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ${API_KEY}" "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || printf "000")
+        if [ "$HTTP_CODE" = "200" ]; then
+            _api_ok=true
+            break
+        fi
+        sleep 2
+        _api_attempt=$((_api_attempt + 1))
+    done
+    if [ "$_api_ok" = true ]; then
         success "API health endpoint → 200"
     else
-        fail "API health endpoint → ${HTTP_CODE}"
+        fail "API health endpoint → ${HTTP_CODE} (after 30s)"
         OVERALL_PASS=false
     fi
 else
     warn "Skipping API verification (container not running or no API key)"
 fi
 
-# 11b. Verify Dashboard
-info "Verifying Dashboard..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${DASHBOARD_PORT}" 2>/dev/null || printf "000")
-if [ "$HTTP_CODE" = "200" ]; then
+# 11b. Verify Dashboard (with retries)
+info "Verifying Dashboard (up to 30s)..."
+_dash_ok=false
+_dash_attempt=1
+while [ $_dash_attempt -le 15 ]; do
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${DASHBOARD_PORT}" 2>/dev/null || printf "000")
+    if [ "$HTTP_CODE" = "200" ]; then
+        _dash_ok=true
+        break
+    fi
+    sleep 2
+    _dash_attempt=$((_dash_attempt + 1))
+done
+if [ "$_dash_ok" = true ]; then
     success "Dashboard → 200"
 else
-    fail "Dashboard → ${HTTP_CODE}"
+    fail "Dashboard → ${HTTP_CODE} (after 30s)"
     OVERALL_PASS=false
 fi
 

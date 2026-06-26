@@ -26,17 +26,19 @@ pub enum RuntimeMode {
     Simulated,
 }
 
-/// Detect if we're running on Linux with enforcement capabilities
+/// Detect if we're running on a platform with native enforcement capabilities.
+///
+/// Linux: nftables, cgroups, inotify, /proc all available.
+/// macOS: pf, kqueue, sysctl all available.
 pub fn detect_runtime_mode() -> RuntimeMode {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        // Check if we have root/CAP_NET_ADMIN for nftables
         RuntimeMode::Native
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        tracing::warn!("Not on Linux — runtime enforcement will be simulated");
+        tracing::warn!("Unsupported platform — runtime enforcement will be simulated");
         RuntimeMode::Simulated
     }
 }

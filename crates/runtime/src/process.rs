@@ -49,7 +49,7 @@ impl ProcessContainmentEngine {
 
         match self.mode {
             RuntimeMode::Native => {
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
                     unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
                 }
@@ -72,7 +72,7 @@ impl ProcessContainmentEngine {
 
         match self.mode {
             RuntimeMode::Native => {
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
                     unsafe { libc::kill(pid as i32, libc::SIGCONT); }
                 }
@@ -95,7 +95,7 @@ impl ProcessContainmentEngine {
 
         match self.mode {
             RuntimeMode::Native => {
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
                     unsafe { libc::kill(pid as i32, libc::SIGKILL); }
                 }
@@ -118,10 +118,8 @@ impl ProcessContainmentEngine {
 
         match self.mode {
             RuntimeMode::Native => {
-                #[cfg(target_os = "linux")]
+                #[cfg(unix)]
                 {
-                    // In production: read /proc/PID/cmdline and exec
-                    // For now: SIGKILL (the restart engine handles actual restart)
                     unsafe { libc::kill(pid as i32, libc::SIGKILL); }
                 }
 
@@ -142,7 +140,7 @@ impl ProcessContainmentEngine {
         let action = self.create_action("process_quarantine", &format!("PID:{}", pid));
 
         // Suspend the process
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
         }
@@ -159,14 +157,16 @@ impl ProcessContainmentEngine {
         }
     }
 
-    /// Check if a PID still exists
+    /// Check if a PID still exists using POSIX signal-0 probe.
     pub fn pid_exists(pid: u32) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
-            std::path::Path::new(&format!("/proc/{}", pid)).exists()
+            // signal 0 = existence probe; never delivered
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
+            let _ = pid;
             true
         }
     }

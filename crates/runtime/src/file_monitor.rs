@@ -55,13 +55,20 @@ impl FileMonitorEngine {
         }
     }
 
-    /// Start inotify monitoring (Linux) or log a simulated-mode notice.
+    /// Start file monitoring:
+    /// - Linux: inotify background thread
+    /// - macOS: kqueue/kevent background thread
+    /// - Other: logs simulated-mode notice only
     pub fn start_monitoring(&mut self) {
         match self.mode {
             RuntimeMode::Native => {
                 #[cfg(target_os = "linux")]
                 {
                     self.start_inotify_thread();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    self.start_kqueue_thread();
                 }
                 tracing::info!(
                     "File monitor started — tracking {} sensitive paths",
@@ -70,7 +77,7 @@ impl FileMonitorEngine {
             }
             RuntimeMode::Simulated => {
                 tracing::info!(
-                    "[SIMULATED] File monitor would watch {} paths (inotify not available)",
+                    "[SIMULATED] File monitor would watch {} paths (kernel hooks not available)",
                     self.monitored_paths.len()
                 );
             }
@@ -141,6 +148,141 @@ impl FileMonitorEngine {
     pub fn event_count(&self) -> usize {
         self.events.len()
     }
+}
+
+// ---------------------------------------------------------------------------
+// macOS kqueue background thread
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+impl FileMonitorEngine {
+    fn start_kqueue_thread(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel::<FileAccessEvent>();
+        self.rx = Some(rx);
+        let paths = self.monitored_paths.clone();
+
+        std::thread::Builder::new()
+            .name("omnisec-kqueue".to_string())
+            .spawn(move || kqueue_reader(paths, tx))
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to spawn kqueue thread: {}", e);
+                std::thread::spawn(|| {})
+            });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kqueue_reader(
+    paths: Vec<String>,
+    tx: std::sync::mpsc::Sender<FileAccessEvent>,
+) {
+    use libc::{
+        kevent, kqueue, EVFILT_VNODE, EV_ADD, EV_CLEAR, EV_ENABLE,
+        NOTE_ATTRIB, NOTE_DELETE, NOTE_RENAME, NOTE_WRITE,
+    };
+    use std::fs::OpenOptions;
+    use std::os::unix::io::IntoRawFd;
+
+    let kq = unsafe { kqueue() };
+    if kq < 0 {
+        tracing::error!("kqueue: kqueue() failed");
+        return;
+    }
+
+    let mut fd_to_path: std::collections::HashMap<i32, String> =
+        std::collections::HashMap::new();
+
+    let fflags = (NOTE_WRITE | NOTE_DELETE | NOTE_ATTRIB | NOTE_RENAME) as u32;
+
+    for path in &paths {
+        let fd = match OpenOptions::new().read(true).open(path) {
+            Ok(f) => f.into_raw_fd(),
+            Err(_) => {
+                tracing::debug!("kqueue: cannot open '{}' for watching", path);
+                continue;
+            }
+        };
+
+        let change = kevent {
+            ident: fd as usize,
+            filter: EVFILT_VNODE as i16,
+            flags: (EV_ADD | EV_ENABLE | EV_CLEAR) as u16,
+            fflags,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+
+        let ret = unsafe {
+            libc::kevent(kq, &change as *const kevent, 1, std::ptr::null_mut(), 0, std::ptr::null())
+        };
+
+        if ret < 0 {
+            tracing::debug!("kqueue: EV_ADD failed for '{}'", path);
+            unsafe { libc::close(fd) };
+        } else {
+            fd_to_path.insert(fd, path.clone());
+            tracing::info!("kqueue watching: {}", path);
+        }
+    }
+
+    if fd_to_path.is_empty() {
+        tracing::warn!("kqueue: no paths could be watched");
+        unsafe { libc::close(kq) };
+        return;
+    }
+
+    let mut evlist: [kevent; 32] = unsafe { std::mem::zeroed() };
+
+    loop {
+        let ts = libc::timespec { tv_sec: 5, tv_nsec: 0 };
+        let nev = unsafe {
+            libc::kevent(kq, std::ptr::null(), 0, evlist.as_mut_ptr(), 32, &ts)
+        };
+
+        if nev < 0 {
+            tracing::error!("kqueue: kevent() read error");
+            break;
+        }
+
+        for i in 0..nev as usize {
+            let ev = &evlist[i];
+            let fd = ev.ident as i32;
+            let path = match fd_to_path.get(&fd) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let action = kqueue_flags_to_action(ev.fflags);
+            tracing::warn!("KQUEUE: {} on {}", action, path);
+
+            let event = FileAccessEvent {
+                id: Uuid::new_v4(),
+                pid: 0,
+                agent_name: "kernel".to_string(),
+                file_path: path,
+                action: action.to_string(),
+                timestamp: chrono::Utc::now(),
+                real_event: true,
+            };
+
+            if tx.send(event).is_err() {
+                break;
+            }
+        }
+    }
+
+    for &fd in fd_to_path.keys() {
+        unsafe { libc::close(fd) };
+    }
+    unsafe { libc::close(kq) };
+}
+
+#[cfg(target_os = "macos")]
+fn kqueue_flags_to_action(fflags: u32) -> &'static str {
+    if fflags & libc::NOTE_WRITE != 0 { return "MODIFY"; }
+    if fflags & libc::NOTE_DELETE != 0 { return "DELETE"; }
+    if fflags & libc::NOTE_RENAME != 0 { return "RENAME"; }
+    if fflags & libc::NOTE_ATTRIB != 0 { return "ATTRIB"; }
+    "UNKNOWN"
 }
 
 // ---------------------------------------------------------------------------
