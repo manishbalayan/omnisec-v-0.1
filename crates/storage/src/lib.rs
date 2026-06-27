@@ -69,28 +69,69 @@ impl Storage {
         Ok(org_id)
     }
 
-    pub async fn create_agent(&self, name: &str, pid: Option<i32>, confidence: Option<i32>) -> Result<Uuid> {
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-
+    /// Upsert an agent by PID.
+    ///
+    /// On conflict (same pid + organization_id), updates all fields in-place so
+    /// the dashboard always shows fresh data without accumulating duplicate rows.
+    pub async fn upsert_agent(
+        &self,
+        name: &str,
+        pid: Option<i32>,
+        confidence: Option<i32>,
+        command_line: Option<&str>,
+        framework: Option<&str>,
+        model_provider: Option<&str>,
+        cpu_usage: Option<f64>,
+        memory_usage: Option<f64>,
+    ) -> Result<Uuid> {
         if self.default_org_id == Uuid::nil() {
             anyhow::bail!("Storage not bootstrapped: call bootstrap_organization() first");
         }
 
-        sqlx::query(
-            "INSERT INTO agents (id, organization_id, name, pid, confidence, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'unknown', $6, $7)"
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+
+        let row = sqlx::query_as::<_, (Uuid,)>(
+            "INSERT INTO agents (
+                id, organization_id, name, pid, confidence, status,
+                command_line, framework, model_provider,
+                cpu_usage, memory_usage, last_heartbeat, created_at, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (pid, organization_id) DO UPDATE SET
+                name            = EXCLUDED.name,
+                confidence      = EXCLUDED.confidence,
+                status          = 'running',
+                command_line    = EXCLUDED.command_line,
+                framework       = EXCLUDED.framework,
+                model_provider  = EXCLUDED.model_provider,
+                cpu_usage       = EXCLUDED.cpu_usage,
+                memory_usage    = EXCLUDED.memory_usage,
+                last_heartbeat  = EXCLUDED.last_heartbeat,
+                updated_at      = EXCLUDED.updated_at
+             RETURNING id",
         )
         .bind(id)
         .bind(self.default_org_id)
         .bind(name)
         .bind(pid)
         .bind(confidence.unwrap_or(0))
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
+        .bind(command_line)
+        .bind(framework)
+        .bind(model_provider)
+        .bind(cpu_usage)
+        .bind(memory_usage)
+        .bind(now) // last_heartbeat
+        .bind(now) // created_at
+        .bind(now) // updated_at
+        .fetch_one(&self.pool)
         .await?;
 
-        Ok(id)
+        Ok(row.0)
+    }
+
+    /// Legacy create (kept for callers that don't have full agent info).
+    pub async fn create_agent(&self, name: &str, pid: Option<i32>, confidence: Option<i32>) -> Result<Uuid> {
+        self.upsert_agent(name, pid, confidence, None, None, None, None, None).await
     }
 
     pub async fn create_event(&self, agent_id: Option<Uuid>, event_type: &str, severity: &str, message: &str) -> Result<Uuid> {
@@ -125,12 +166,22 @@ impl Storage {
     }
 
     pub async fn get_agents(&self) -> Result<Vec<serde_json::Value>> {
+        // Only return agents seen within the last 30 seconds (last_heartbeat kept fresh by upsert).
+        // Falls back to agents updated in the last 60 s if last_heartbeat is null (legacy rows).
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT row_to_json(t)::text FROM (SELECT * FROM agents WHERE confidence > 0 ORDER BY created_at DESC) t"
+            "SELECT row_to_json(t)::text FROM (
+                SELECT * FROM agents
+                WHERE confidence > 0
+                  AND (
+                    last_heartbeat > NOW() - INTERVAL '30 seconds'
+                    OR (last_heartbeat IS NULL AND updated_at > NOW() - INTERVAL '60 seconds')
+                  )
+                ORDER BY confidence DESC, updated_at DESC
+            ) t"
         )
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(rows.iter().filter_map(|r| serde_json::from_str(r).ok()).collect())
     }
 

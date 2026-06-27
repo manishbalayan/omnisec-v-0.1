@@ -32,9 +32,9 @@
             gap: 6px;
             padding: 6px 14px;
             border-radius: 20px;
-            background: rgba(234, 179, 8, 0.1);
-            border: 1px solid rgba(234, 179, 8, 0.3);
-            color: #eab308;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            color: #22c55e;
             font-size: 13px;
             font-weight: 600;
             margin-bottom: 24px;
@@ -55,21 +55,6 @@
             max-width: 560px;
             margin: 0 auto 40px;
         }
-
-        .warning-banner {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 14px 20px;
-            border-radius: 10px;
-            background: rgba(234, 179, 8, 0.08);
-            border: 1px solid rgba(234, 179, 8, 0.2);
-            color: #fbbf24;
-            font-size: 14px;
-            text-align: left;
-            margin-bottom: 28px;
-        }
-        .warning-banner strong { color: #fde68a; }
 
         .terminal {
             background: #1a1a24;
@@ -103,8 +88,6 @@
             overflow-x: auto;
         }
         .terminal-body .prompt { color: #818cf8; }
-        .terminal-body .comment { color: #52525b; font-style: italic; }
-        .terminal-body .future { color: #eab308; }
         .copy-btn {
             display: inline-flex;
             align-items: center;
@@ -122,6 +105,26 @@
         }
         .copy-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 24px rgba(34, 197, 94, 0.3); }
         .copy-btn.copied { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+
+        .platforms {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 12px;
+            margin: 20px 0;
+        }
+        .platform-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            background: #1a1a24;
+            border: 1px solid #22c55e40;
+            font-size: 13px;
+            font-weight: 500;
+            color: #22c55e;
+        }
 
         .features {
             padding: 80px 0;
@@ -151,56 +154,6 @@
         .feature-card h3 { font-size: 17px; font-weight: 600; margin-bottom: 8px; color: #e4e4e7; }
         .feature-card p { font-size: 14px; color: #a1a1aa; line-height: 1.6; }
 
-        .platforms {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 12px;
-            margin: 20px 0;
-        }
-        .platform-tag {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 8px 16px;
-            border-radius: 8px;
-            background: #1a1a24;
-            border: 1px solid #27272a;
-            font-size: 13px;
-            font-weight: 500;
-            color: #a1a1aa;
-        }
-        .platform-tag.active { border-color: #22c55e40; color: #22c55e; }
-        .platform-tag.future { border-color: #eab30840; color: #eab308; }
-
-        .roadmap-note {
-            margin-top: 28px;
-            padding: 24px;
-            background: #12121a;
-            border: 1px solid #27272a;
-            border-radius: 12px;
-            text-align: left;
-        }
-        .roadmap-note h3 {
-            font-size: 16px;
-            font-weight: 600;
-            color: #eab308;
-            margin-bottom: 12px;
-        }
-        .roadmap-note p {
-            font-size: 14px;
-            color: #a1a1aa;
-            line-height: 1.6;
-        }
-        .roadmap-note code {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 13px;
-            color: #a1f7a1;
-            background: #1a1a24;
-            padding: 2px 8px;
-            border-radius: 4px;
-        }
-
         footer {
             margin-top: auto;
             padding: 40px 0;
@@ -223,19 +176,15 @@
 <body>
     <section class="hero">
         <div class="container">
-            <div class="hero-badge">🚧 FUTURE ROADMAP — Not Yet Available</div>
+            <div class="hero-badge">✅ Linux &amp; macOS — All architectures supported</div>
             <h1>OmniSec<br>One-Command Install</h1>
             <p>Runtime reliability, security, and observability for autonomous AI agents. Runs on Linux and macOS.</p>
 
-            <div class="warning-banner">
-                ⚠️ <span><strong>This install endpoint does not exist yet.</strong> The command below is a future roadmap goal. To install OmniSec today, use the <strong>GitHub raw URL</strong> shown in the terminal.</span>
-            </div>
-
             <div class="platforms">
-                <span class="platform-tag active">🐧 Linux AMD64</span>
-                <span class="platform-tag active">🐧 Linux ARM64</span>
-                <span class="platform-tag future">🍎 macOS Intel (Pre-release)</span>
-                <span class="platform-tag future">🍎 macOS Apple Silicon (Pre-release)</span>
+                <span class="platform-tag">🐧 Linux AMD64</span>
+                <span class="platform-tag">🐧 Linux ARM64</span>
+                <span class="platform-tag">🍎 macOS Intel</span>
+                <span class="platform-tag">🍎 macOS Apple Silicon</span>
             </div>
 
             <div class="terminal">
@@ -246,32 +195,14 @@
                     <span style="margin-left: 12px; font-size: 13px; color: #52525b;">bash — omnisec install</span>
                 </div>
                 <div class="terminal-body">
-                    <span class="comment"># Current installation (works today):</span><br>
-                    <span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh <span style="color: #818cf8;">|</span> sh<br><br>
-                    <span class="comment"># 🚧 Future install endpoint (not yet available):</span><br>
-                    <span class="future"># curl -fsSL https://install.omnisec.ai | sh</span>
+                    <span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh <span style="color: #818cf8;">|</span> sh
                 </div>
             </div>
 
             <button class="copy-btn" onclick="copyCommand()" id="copyBtn">
                 <span id="copyIcon">📋</span>
-                <span id="copyText">Copy Current Install Command</span>
+                <span id="copyText">Copy Install Command</span>
             </button>
-
-            <div class="roadmap-note">
-                <h3>🚧 Future Roadmap: install.omnisec.ai</h3>
-                <p>
-                    A dedicated install endpoint at <code>https://install.omnisec.ai</code> is planned for a future release.
-                    Until that infrastructure is deployed and verified, the only supported installation method is
-                    the <strong>GitHub raw URL</strong> command shown above.
-                </p>
-                <p style="margin-top: 10px;">
-                    The following is <strong>not yet available</strong> and will result in a DNS resolution error:
-                </p>
-                <p style="margin-top: 6px;">
-                    <code style="color: #eab308;">curl -fsSL https://install.omnisec.ai | sh</code>
-                </p>
-            </div>
         </div>
     </section>
 
@@ -333,7 +264,7 @@
                 setTimeout(() => {
                     btn.classList.remove('copied');
                     icon.textContent = '📋';
-                    label.textContent = 'Copy Current Install Command';
+                    label.textContent = 'Copy Install Command';
                 }, 2500);
             });
         }

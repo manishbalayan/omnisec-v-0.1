@@ -44,19 +44,8 @@ No Rust, Cargo, or compilation required.
 |----------|-------------|---------|
 | Linux | x86_64 (amd64) | ✅ |
 | Linux | aarch64 (arm64) | ✅ |
-| macOS Intel | x86_64 (amd64) | ⚠️ Pre-release — binaries available, testing ongoing |
-| macOS Apple Silicon | aarch64 (arm64) | ⚠️ Pre-release — binaries available, testing ongoing |
-
-### Future Installation Endpoint (Planned)
-
-A dedicated install endpoint at `https://install.omnisec.ai` is planned for a future release.
-
-```bash
-# 🚧 NOT YET AVAILABLE — this is a future roadmap goal
-# curl -fsSL https://install.omnisec.ai | sh
-```
-
-The current installation method using the GitHub raw URL (above) is the only supported installation path today.
+| macOS Intel | x86_64 (amd64) | ✅ |
+| macOS Apple Silicon | aarch64 (arm64) | ✅ |
 
 ### Development
 

@@ -161,26 +161,34 @@ async fn main() -> Result<()> {
                     // Only publish agents with a minimum confidence threshold.
                     // This filters out infrastructure processes (postgres, nats, kernel
                     // threads, bash, etc.) that have no AI agent indicators.
-                    let min_confidence = 20u8;
+                    let min_confidence = 40u8;
                     let agents: Vec<_> = all_agents
                         .into_iter()
                         .filter(|a| a.confidence >= min_confidence)
                         .collect();
 
                     for agent in &agents {
-                        // Persist new agents to database (only on first discovery)
-                        if !stored_agents.contains_key(&agent.pid) {
-                            if let Some(ref store) = discovery_storage {
-                                match store.create_agent(&agent.name, Some(agent.pid as i32), Some(agent.confidence as i32)).await {
+                        // Upsert every cycle so CPU/memory/confidence stay fresh.
+                        // ON CONFLICT (pid, org) updates in-place — no duplicates.
+                        if let Some(ref store) = discovery_storage {
+                            match store.upsert_agent(
+                                &agent.name,
+                                Some(agent.pid as i32),
+                                Some(agent.confidence as i32),
+                                Some(&agent.command),
+                                agent.framework.as_deref(),
+                                agent.model_provider.as_deref(),
+                                agent.cpu_percent,
+                                agent.memory_mb,
+                            ).await {
                                     Ok(agent_id) => {
                                         stored_agents.insert(agent.pid, agent_id);
-                                        tracing::info!("Stored agent {} (PID: {}) in database", agent.name, agent.pid);
+                                        tracing::info!("Upserted agent {} (PID: {}) framework={:?}", agent.name, agent.pid, agent.framework);
                                     }
                                     Err(e) => {
-                                        tracing::error!("Failed to store agent {}: {}", agent.name, e);
+                                        tracing::error!("Failed to upsert agent {}: {}", agent.name, e);
                                     }
                                 }
-                            }
                         }
 
                         let payload = AgentDiscoveredPayload {

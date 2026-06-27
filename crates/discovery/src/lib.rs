@@ -212,42 +212,80 @@ impl AgentDiscovery {
     fn discover_macos(&self) -> Result<Vec<DiscoveredAgent>> {
         use std::process::Command;
 
+        // -ww: no truncation. = suffix on each field suppresses the header row.
+        // Fields: pid, ppid, %cpu, rss (KB), comm (basename ≤15 chars), args (full argv).
         let output = Command::new("ps")
-            .args(["-axo", "pid,ppid,comm,args"])
+            .args(["-axwwo", "pid=,ppid=,pcpu=,rss=,comm=,args="])
             .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut agents = Vec::new();
 
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.splitn(4, char::is_whitespace).collect();
-            if parts.len() >= 3 {
-                if let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                    let comm = parts[2].to_string();
-                    let cmdline = if parts.len() > 3 { parts[3].to_string() } else { comm.clone() };
+        for line in stdout.lines() {
+            // split_whitespace() handles leading/trailing spaces and collapsed runs.
+            let mut tokens = line.split_whitespace();
 
-                    let env_vars = self.get_env_vars(pid);
-                    let filtered_env_vars = self.filter_sensitive_env_vars(&env_vars);
-                    let framework = self.detect_framework(&comm, &cmdline, &filtered_env_vars);
-                    let model_provider = self.detect_model_provider(&cmdline, &filtered_env_vars);
-                    let confidence = self.calculate_confidence(&comm, &cmdline, &filtered_env_vars, &framework, &model_provider, 0.0);
+            let pid: u32 = match tokens.next().and_then(|s| s.parse().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+            let ppid: u32 = match tokens.next().and_then(|s| s.parse().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+            let cpu_percent: f64 = tokens.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let rss_kb: f64 = tokens.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let comm = match tokens.next() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // Remaining tokens form the full command line (argv joined).
+            let args_tokens: Vec<&str> = tokens.collect();
+            let cmdline = if args_tokens.is_empty() {
+                comm.clone()
+            } else {
+                args_tokens.join(" ")
+            };
 
-                    agents.push(DiscoveredAgent {
-                        pid,
-                        ppid: Some(ppid),
-                        name: comm,
-                        command: cmdline,
-                        framework,
-                        model_provider,
-                        memory_mb: None,
-                        cpu_percent: None,
-                        status: AgentStatus::Running,
-                        env_vars: filtered_env_vars,
-                        listening_ports: vec![],
-                        confidence,
-                    });
-                }
+            // Skip kernel threads and infrastructure processes that are never AI agents.
+            if self.is_infrastructure(&comm, &cmdline) {
+                continue;
             }
+
+            // Use the basename of argv[0] as the display name.
+            // comm is truncated to 15 chars on macOS; the full path is in cmdline's first token.
+            let display_name = cmdline
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.rsplit('/').next())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&comm)
+                .to_string();
+
+            let env_vars = self.get_env_vars(pid);
+            let filtered_env = self.filter_sensitive_env_vars(&env_vars);
+            let framework = self.detect_framework(&display_name, &cmdline, &filtered_env);
+            let model_provider = self.detect_model_provider(&cmdline, &filtered_env);
+            // Use cpu_ticks proxy: high %cpu * 1000 as a rough equivalent
+            let cpu_ticks_proxy = cpu_percent * 100.0;
+            let confidence = self.calculate_confidence(
+                &display_name, &cmdline, &filtered_env, &framework, &model_provider, cpu_ticks_proxy,
+            );
+
+            agents.push(DiscoveredAgent {
+                pid,
+                ppid: Some(ppid),
+                name: display_name,
+                command: cmdline,
+                framework,
+                model_provider,
+                memory_mb: Some(rss_kb / 1024.0),
+                cpu_percent: Some(cpu_percent),
+                status: AgentStatus::Running,
+                env_vars: filtered_env,
+                listening_ports: vec![],
+                confidence,
+            });
         }
 
         Ok(agents)
@@ -258,10 +296,84 @@ impl AgentDiscovery {
         {
             return self._get_env_vars_linux(pid);
         }
-        // macOS and other platforms: env vars not available via ps
+        #[cfg(target_os = "macos")]
+        {
+            return self._get_env_vars_macos(pid);
+        }
         #[allow(unused_variables)]
         let _ = pid;
         vec![]
+    }
+
+    /// Read env var keys from sysctl KERN_PROCARGS2 on macOS.
+    /// The buffer layout is: argc(i32) + execpath\0 + argv\0... + env\0...
+    /// We skip past argc and all argv entries, then collect KEY= prefixes.
+    #[cfg(target_os = "macos")]
+    fn _get_env_vars_macos(&self, pid: u32) -> Vec<String> {
+        use libc::{c_int, c_void, size_t};
+        const ARG_MAX: usize = 256 * 1024;
+        let mut mib: [c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as c_int];
+        let mut size: size_t = ARG_MAX;
+        let mut buf = vec![0u8; ARG_MAX];
+        let ret = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(), 3,
+                buf.as_mut_ptr() as *mut c_void, &mut size,
+                std::ptr::null_mut(), 0,
+            )
+        };
+        if ret != 0 || size < 4 { return vec![]; }
+        buf.truncate(size);
+
+        let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]).max(0) as usize;
+        let segments: Vec<&[u8]> = buf[4..].split(|&b| b == 0).collect();
+
+        // Skip execpath (1) + argc argv entries; everything after is env.
+        let env_start = 1 + argc;
+        segments.iter()
+            .skip(env_start)
+            .filter_map(|s| {
+                if s.is_empty() { return None; }
+                // Only return the KEY portion (before '=')
+                let s = std::str::from_utf8(s).ok()?;
+                Some(s.splitn(2, '=').next().unwrap_or(s).to_string())
+            })
+            .take(256) // cap to avoid scanning gigantic envs
+            .collect()
+    }
+
+    /// Returns true for kernel threads and infrastructure processes that should
+    /// never appear in agent discovery results.
+    fn is_infrastructure(&self, comm: &str, cmdline: &str) -> bool {
+        let comm_lower = comm.to_lowercase();
+        let cmdline_lower = cmdline.to_lowercase();
+
+        // Exact infrastructure process names
+        const INFRA_EXACT: &[&str] = &[
+            "postgres", "nats-server", "supervisord", "launchd",
+            "kernel_task", "syslogd", "configd", "notifyd", "diskarbitrationd",
+            "windowserver", "loginwindow", "coreaudiod", "corebluetooth",
+            "coreservicesd", "trustd", "securityd", "authd", "opendirectoryd",
+            "mdworker", "mds", "mds_stores", "spotlight", "revisiond",
+            "spindump", "ReportCrash", "com.apple", "distnoted", "lsd",
+            "ctkahp", "nsurlsessiond", "sharingd", "rapportd",
+        ];
+
+        if INFRA_EXACT.iter().any(|p| comm_lower.starts_with(p)) {
+            return true;
+        }
+
+        // OmniSec's own processes
+        if comm_lower.contains("omnisec") || cmdline_lower.contains("omnisec") {
+            return true;
+        }
+
+        // next-server (Next.js dashboard) and similar build tools
+        if comm_lower == "next-server" || cmdline_lower.contains("next-server") {
+            return true;
+        }
+
+        false
     }
 
     #[cfg(target_os = "linux")]
