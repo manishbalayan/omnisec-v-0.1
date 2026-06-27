@@ -71,27 +71,57 @@ async fn main() -> Result<()> {
     // --- NATS connection ---
     let nats_url = std::env::var("NATS_URL")
         .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let nats = Arc::new(NatsClient::connect(&nats_url, "omnisec-daemon").await?);
+    let nats = {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match NatsClient::connect(&nats_url, "omnisec-daemon").await {
+                Ok(client) => break Arc::new(client),
+                Err(e) => {
+                    if attempt >= 12 {
+                        tracing::error!("NATS unavailable after 12 attempts — exiting so supervisor can retry: {}", e);
+                        std::process::exit(1);
+                    }
+                    tracing::warn!("NATS connect attempt {}/12 failed, retrying in 5s: {}", attempt, e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    };
 
     // --- Storage ---
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/omnisec".to_string());
 
-    let storage = match Storage::new(&database_url).await {
-        Ok(mut s) => {
-            tracing::info!("Connected to database");
-            if let Err(e) = s.run_migrations().await {
-                tracing::warn!("Migration warning: {}", e);
+    let storage = {
+        let mut attempt = 0u32;
+        let max_attempts = 12;
+        let mut result = None;
+        loop {
+            attempt += 1;
+            match Storage::new(&database_url).await {
+                Ok(mut s) => {
+                    tracing::info!("Connected to database");
+                    if let Err(e) = s.run_migrations().await {
+                        tracing::warn!("Migration warning: {}", e);
+                    }
+                    if let Err(e) = s.bootstrap_organization().await {
+                        tracing::error!("DB bootstrap failed — agents/events will not persist: {}", e);
+                    }
+                    result = Some(Arc::new(s));
+                    break;
+                }
+                Err(e) => {
+                    if attempt >= max_attempts {
+                        tracing::error!("Database unavailable after {} attempts — exiting so supervisor can retry: {}", max_attempts, e);
+                        std::process::exit(1);
+                    }
+                    tracing::warn!("DB connect attempt {}/{} failed, retrying in 5s: {}", attempt, max_attempts, e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
             }
-            if let Err(e) = s.bootstrap_organization().await {
-                tracing::error!("DB bootstrap failed — agents/events will not persist: {}", e);
-            }
-            Some(Arc::new(s))
         }
-        Err(e) => {
-            tracing::warn!("Database not available, running in memory-only mode: {}", e);
-            None
-        }
+        result
     };
 
     // --- Alert manager ---
@@ -161,7 +191,7 @@ async fn main() -> Result<()> {
                     // Only publish agents with a minimum confidence threshold.
                     // This filters out infrastructure processes (postgres, nats, kernel
                     // threads, bash, etc.) that have no AI agent indicators.
-                    let min_confidence = 40u8;
+                    let min_confidence = 30u8;
                     let agents: Vec<_> = all_agents
                         .into_iter()
                         .filter(|a| a.confidence >= min_confidence)

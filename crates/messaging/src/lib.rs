@@ -30,10 +30,10 @@ impl NatsClient {
 
         let opts = ConnectOptions::new()
             .name(name.to_string())
-            .retry_on_initial_connect()
-            .max_reconnects(Some(10))
+            .max_reconnects(None)
             .reconnect_delay_callback(move |attempt| {
-                Duration::from_secs(2u64.min(2u64.pow(attempt as u32)))
+                // Cap at 5s so recovery after a container restart isn't slow.
+                Duration::from_secs(5u64.min(2u64.pow(attempt as u32)))
             });
 
         let client = opts.connect(effective_url.as_str()).await?;

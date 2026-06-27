@@ -1,5 +1,49 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Cached result of scanning active network connections for LLM traffic.
+/// Refreshed at most once every 30 seconds to avoid hammering lsof.
+#[derive(Clone)]
+struct LlmConnectionCache {
+    /// PIDs that currently have an active connection to an LLM provider API.
+    pids: HashSet<u32>,
+    /// The provider name keyed by PID (e.g. "Anthropic", "OpenAI").
+    providers: HashMap<u32, String>,
+    refreshed_at: Instant,
+}
+
+impl LlmConnectionCache {
+    fn empty() -> Self {
+        Self {
+            pids: HashSet::new(),
+            providers: HashMap::new(),
+            refreshed_at: Instant::now() - Duration::from_secs(60),
+        }
+    }
+}
+
+/// Well-known LLM provider API hostnames and the provider label to use.
+const LLM_PROVIDER_HOSTS: &[(&str, &str)] = &[
+    ("api.anthropic.com",                    "Anthropic"),
+    ("api.openai.com",                       "OpenAI"),
+    ("generativelanguage.googleapis.com",    "Google"),
+    ("aiplatform.googleapis.com",            "Google"),
+    ("api.cohere.com",                       "Cohere"),
+    ("api.cohere.ai",                        "Cohere"),
+    ("api.mistral.ai",                       "Mistral"),
+    ("api.groq.com",                         "Groq"),
+    ("openrouter.ai",                        "OpenRouter"),
+    ("api.together.xyz",                     "Together"),
+    ("api.deepseek.com",                     "DeepSeek"),
+    ("api.x.ai",                             "xAI"),
+    ("inference.fireworks.ai",               "Fireworks"),
+    ("api.perplexity.ai",                    "Perplexity"),
+    ("api.replicate.com",                    "Replicate"),
+    ("api-inference.huggingface.co",         "HuggingFace"),
+];
 
 /// Returns the proc mount path to use for agent discovery.
 /// When running in a Docker container with `-v /proc:/host/proc:ro`,
@@ -38,6 +82,7 @@ pub enum AgentStatus {
 
 pub struct AgentDiscovery {
     known_frameworks: Vec<FrameworkPattern>,
+    llm_conn_cache: Arc<Mutex<LlmConnectionCache>>,
 }
 
 struct FrameworkPattern {
@@ -57,6 +102,7 @@ impl AgentDiscovery {
     pub fn new() -> Self {
         Self {
             known_frameworks: Self::build_framework_patterns(),
+            llm_conn_cache: Arc::new(Mutex::new(LlmConnectionCache::empty())),
         }
     }
 
@@ -77,6 +123,36 @@ impl AgentDiscovery {
                 env_indicators: vec!["ANTHROPIC_API_KEY".to_string(), "CLAUDE".to_string()],
             },
             FrameworkPattern {
+                name: "Hermes".to_string(),
+                process_patterns: vec!["hermes".to_string()],
+                command_patterns: vec!["hermes_cli".to_string(), "hermes-agent".to_string(), ".hermes/".to_string(), "hermes.app".to_string()],
+                env_indicators: vec!["HERMES".to_string()],
+            },
+            FrameworkPattern {
+                name: "OpenClaw".to_string(),
+                process_patterns: vec!["openclaw".to_string()],
+                command_patterns: vec!["openclaw".to_string(), ".openclaw/".to_string()],
+                env_indicators: vec!["OPENCLAW".to_string()],
+            },
+            FrameworkPattern {
+                name: "Cursor".to_string(),
+                process_patterns: vec!["cursor".to_string()],
+                command_patterns: vec!["cursor".to_string(), ".cursor/".to_string()],
+                env_indicators: vec!["CURSOR".to_string()],
+            },
+            FrameworkPattern {
+                name: "Windsurf".to_string(),
+                process_patterns: vec!["windsurf".to_string(), "codeium".to_string()],
+                command_patterns: vec!["windsurf".to_string(), "codeium".to_string()],
+                env_indicators: vec!["CODEIUM".to_string()],
+            },
+            FrameworkPattern {
+                name: "Aider".to_string(),
+                process_patterns: vec!["aider".to_string()],
+                command_patterns: vec!["aider".to_string()],
+                env_indicators: vec!["AIDER".to_string()],
+            },
+            FrameworkPattern {
                 name: "CrewAI".to_string(),
                 process_patterns: vec!["crew".to_string(), "crewai".to_string()],
                 command_patterns: vec!["crewai".to_string(), "crew_ai".to_string()],
@@ -89,8 +165,14 @@ impl AgentDiscovery {
                 env_indicators: vec!["LANGCHAIN".to_string(), "LANGGRAPH".to_string()],
             },
             FrameworkPattern {
+                name: "AutoGen".to_string(),
+                process_patterns: vec!["autogen".to_string()],
+                command_patterns: vec!["autogen".to_string(), "pyautogen".to_string()],
+                env_indicators: vec!["AUTOGEN".to_string()],
+            },
+            FrameworkPattern {
                 name: "OpenAI Agents SDK".to_string(),
-                process_patterns: vec!["openai".to_string(), "agents".to_string()],
+                process_patterns: vec!["openai".to_string()],
                 command_patterns: vec!["openai".to_string(), "agents-sdk".to_string()],
                 env_indicators: vec!["OPENAI_API_KEY".to_string()],
             },
@@ -188,9 +270,9 @@ impl AgentDiscovery {
         let listening_ports = self.get_listening_ports(pid);
 
         let framework = self.detect_framework(&comm, &cmdline, &env_vars);
-        let model_provider = self.detect_model_provider(&cmdline, &env_vars);
+        let model_provider = self.detect_model_provider(&cmdline, &raw_env_vars);
 
-        let confidence = self.calculate_confidence(&comm, &cmdline, &env_vars, &framework, &model_provider, cpu_ticks);
+        let confidence = self.calculate_confidence(&comm, &cmdline, &raw_env_vars, &framework, &model_provider, cpu_ticks);
 
         Some(DiscoveredAgent {
             pid,
@@ -211,6 +293,9 @@ impl AgentDiscovery {
     #[cfg(target_os = "macos")]
     fn discover_macos(&self) -> Result<Vec<DiscoveredAgent>> {
         use std::process::Command;
+
+        // Refresh LLM connection cache (no-op if refreshed within the last 30s).
+        self.refresh_llm_connections();
 
         // -ww: no truncation. = suffix on each field suppresses the header row.
         // Fields: pid, ppid, %cpu, rss (KB), comm (basename ≤15 chars), args (full argv).
@@ -262,15 +347,30 @@ impl AgentDiscovery {
                 .unwrap_or(&comm)
                 .to_string();
 
-            let env_vars = self.get_env_vars(pid);
-            let filtered_env = self.filter_sensitive_env_vars(&env_vars);
+            // Raw env var names are needed for API-key-based detection in confidence scoring.
+            // We filter sensitive keys before storing/returning — detection happens first.
+            let raw_env_vars = self.get_env_vars(pid);
+            let filtered_env = self.filter_sensitive_env_vars(&raw_env_vars);
             let framework = self.detect_framework(&display_name, &cmdline, &filtered_env);
-            let model_provider = self.detect_model_provider(&cmdline, &filtered_env);
-            // Use cpu_ticks proxy: high %cpu * 1000 as a rough equivalent
+            let mut model_provider = self.detect_model_provider(&cmdline, &raw_env_vars);
             let cpu_ticks_proxy = cpu_percent * 100.0;
-            let confidence = self.calculate_confidence(
-                &display_name, &cmdline, &filtered_env, &framework, &model_provider, cpu_ticks_proxy,
+            let mut confidence = self.calculate_confidence(
+                &display_name, &cmdline, &raw_env_vars, &framework, &model_provider, cpu_ticks_proxy,
             );
+
+            // Network signal: if this PID has an active HTTPS connection to an LLM
+            // provider right now, it is almost certainly an AI agent (+55).
+            // This is the most reliable signal for custom agents that store keys in
+            // config files rather than environment variables.
+            {
+                let cache = self.llm_conn_cache.lock().unwrap();
+                if cache.pids.contains(&pid) {
+                    confidence = confidence.saturating_add(55).min(100);
+                    if model_provider.is_none() {
+                        model_provider = cache.providers.get(&pid).cloned();
+                    }
+                }
+            }
 
             agents.push(DiscoveredAgent {
                 pid,
@@ -288,7 +388,48 @@ impl AgentDiscovery {
             });
         }
 
-        Ok(agents)
+        // Deduplicate: if a process's parent is ALSO above the confidence threshold
+        // in this scan, discard the child. This collapses framework worker pools
+        // (Hermes slash_workers, Ollama llama-server forks) without accidentally
+        // dropping agents whose parent is a shell or terminal (confidence=0).
+        let min_confidence = 30u8;
+        let qualified_pids: std::collections::HashSet<u32> = agents
+            .iter()
+            .filter(|a| a.confidence >= min_confidence)
+            .map(|a| a.pid)
+            .collect();
+        agents.retain(|a| {
+            if a.confidence < min_confidence {
+                return false; // drop below-threshold entries entirely
+            }
+            match a.ppid {
+                Some(ppid) if qualified_pids.contains(&ppid) => false, // parent is AI agent → child
+                _ => true,
+            }
+        });
+
+        // Name-based deduplication: keep only the highest-confidence entry per process
+        // name. This collapses Ollama llama-server workers (re-parented to PID 1 by macOS,
+        // so tree dedup can't catch them) into a single representative entry.
+        let mut seen_names: HashMap<String, usize> = HashMap::new();
+        let mut name_deduped = Vec::with_capacity(agents.len());
+        for agent in agents {
+            let name_lower = agent.name.to_lowercase();
+            match seen_names.get(&name_lower) {
+                None => {
+                    seen_names.insert(name_lower, name_deduped.len());
+                    name_deduped.push(agent);
+                }
+                Some(&idx) => {
+                    // Replace previous entry if this one has higher confidence.
+                    if agent.confidence > name_deduped[idx].confidence {
+                        name_deduped[idx] = agent;
+                    }
+                }
+            }
+        }
+
+        Ok(name_deduped)
     }
 
     fn get_env_vars(&self, pid: u32) -> Vec<String> {
@@ -479,87 +620,203 @@ impl AgentDiscovery {
     /// Calculate an agent confidence score (0–100) based on multiple signals.
     /// This is the primary classification mechanism — framework detection is
     /// only used as metadata, not as the definitive classification.
+    /// Score a process purely on behavioral signals, not on knowing its name.
+    /// A custom agent with no known name will still be detected if it:
+    ///   - Has an LLM API key in its environment
+    ///   - Passes a model name on its command line
+    ///   - Imports a known AI framework module
+    ///   - Calls an LLM provider API endpoint
+    ///
+    /// The `raw_env_vars` parameter must be the UNFILTERED list of env var names
+    /// so that API key presence can be detected before they are redacted.
     fn calculate_confidence(
         &self,
         comm: &str,
         cmdline: &str,
-        env_vars: &[String],
+        raw_env_vars: &[String],
         framework: &Option<String>,
         model_provider: &Option<String>,
         cpu_ticks: f64,
     ) -> u8 {
         let mut score: u8 = 0;
-
-        // Signal 1: Process name contains agent-related keywords (+25)
         let comm_lower = comm.to_lowercase();
-        let agent_keywords = ["agent", "bot", "assistant", "ai-", "llm", "model", "crew", "codebuff"];
-        if agent_keywords.iter().any(|k| comm_lower.contains(k)) {
-            score = score.saturating_add(25);
-        }
-
-        // Signal 2: Known AI model API indicators in command line or env (+25)
         let cmdline_lower = cmdline.to_lowercase();
-        let model_indicators = ["openai", "anthropic", "claude", "gpt-", "gemini", "llama", "mistral"];
-        if model_indicators.iter().any(|k| cmdline_lower.contains(k)) {
+
+        // Signal 0: The AI framework's own code is being executed (+35).
+        // We check the ARGUMENTS portion (after argv[0]) so that a user's script that
+        // merely happens to use an AI app's interpreter binary doesn't falsely match.
+        // Example: `~/.hermes/node/bin/node ~/myproject/app.js` → no match (user project)
+        //          `~/.hermes/node/bin/node ~/.hermes/openclaw/index.js` → match (AI code)
+        const AI_INSTALL_PATHS: &[&str] = &[
+            "/.hermes/", "/.openclaw/", "/.cursor/", "/.continue/",
+            "/.aider/", "/.codeium/", "/.windsurf/",
+            "/hermes-agent/", "/openclaw/", "/.devin/", "/.opendevin/",
+        ];
+        let args_after_binary = cmdline.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        let args_lower = args_after_binary.to_lowercase();
+        if AI_INSTALL_PATHS.iter().any(|d| args_lower.contains(d)) {
+            score = score.saturating_add(35);
+        }
+
+        // Signal 1: LLM API key present in environment (+50)
+        // This is the strongest signal: any process holding an LLM provider key
+        // is almost certainly an AI agent, regardless of what it's called.
+        const LLM_API_KEY_PATTERNS: &[&str] = &[
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "COHERE_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY",
+            "HUGGINGFACE_TOKEN", "HF_TOKEN", "TOGETHER_API_KEY",
+            "REPLICATE_API_TOKEN", "FIREWORKS_API_KEY", "PERPLEXITY_API_KEY",
+            "XAI_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+        ];
+        if raw_env_vars.iter().any(|v| LLM_API_KEY_PATTERNS.iter().any(|p| v.to_uppercase() == *p)) {
+            score = score.saturating_add(50);
+        }
+
+        // Signal 2: LLM model name appears in command line (+25)
+        // Passing a specific model name as an argument is a strong behavioral signal.
+        const MODEL_NAMES: &[&str] = &[
+            "claude", "gpt-4", "gpt-3", "gpt4", "gemini", "llama", "mistral",
+            "phi-", "qwen", "deepseek", "codestral", "mixtral", "falcon",
+            "openai", "anthropic",
+        ];
+        if MODEL_NAMES.iter().any(|m| cmdline_lower.contains(m)) {
             score = score.saturating_add(25);
         }
 
-        // Signal 3: Known specific framework match (+20)
-        // Generic runtimes (Python, Node, Docker) are not a strong signal.
-        if framework.is_some()
-            && framework.as_deref() != Some("Python Agent")
-            && framework.as_deref() != Some("Node Agent")
-            && framework.as_deref() != Some("Docker Agent")
-        {
+        // Signal 3: AI framework module or library imported via command line (+20)
+        // e.g. `python -m langchain ...`, `node openai-sdk/index.js ...`
+        const AI_FRAMEWORK_MODULES: &[&str] = &[
+            "langchain", "langgraph", "crewai", "autogen", "pyautogen",
+            "llama_index", "llamaindex", "semantic_kernel", "guidance",
+            "dspy", "instructor", "openagents", "agentops",
+            "hermes_cli", "tui_gateway", "slash_worker", "openclaw",
+        ];
+        if AI_FRAMEWORK_MODULES.iter().any(|m| cmdline_lower.contains(m)) {
             score = score.saturating_add(20);
         }
 
-        // Signal 4: Known model provider (+15)
-        if model_provider.is_some() {
+        // Signal 4: LLM provider API domain in command line (+20)
+        // Processes explicitly configured to call LLM APIs are agents.
+        const LLM_API_DOMAINS: &[&str] = &[
+            "api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com",
+            "api.cohere.com", "api.mistral.ai", "api.groq.com", "openrouter.ai",
+            "api.together.xyz", "api.deepseek.com",
+        ];
+        if LLM_API_DOMAINS.iter().any(|d| cmdline_lower.contains(d)) {
+            score = score.saturating_add(20);
+        }
+
+        // Signal 5: `--model` flag in args (+15)
+        // Any process that accepts a `--model` argument is almost certainly
+        // an AI agent or AI tool, regardless of its name.
+        if cmdline_lower.contains("--model ") || cmdline_lower.contains("--model=") {
             score = score.saturating_add(15);
         }
 
-        // Signal 5: AI-related env vars in the (filtered) environment (+15)
-        if env_vars.iter().any(|v| {
-            let upper = v.to_uppercase();
-            upper.contains("OPENAI") || upper.contains("ANTHROPIC") || upper.contains("VIRTUAL_ENV")
-        }) {
-            score = score.saturating_add(15);
-        }
-
-        // Signal 6: Long-running process (high cumulative CPU ticks) (+10)
-        if cpu_ticks > 1000.0 {
+        // Signal 6: Framework metadata matched (for labeling, not primary detection) (+10)
+        // Generic runtimes alone are not enough; only count specific framework matches.
+        const GENERIC_FRAMEWORKS: &[&str] = &["Python Agent", "Node Agent", "Docker Agent"];
+        if framework.is_some() && !GENERIC_FRAMEWORKS.iter().any(|f| framework.as_deref() == Some(f)) {
             score = score.saturating_add(10);
         }
 
-        // Signal 7: Generic runtime with API keys — might still be agent (+5)
-        let is_generic_runtime = comm_lower.contains("python") || comm_lower.contains("node");
-        if is_generic_runtime && framework.is_some() {
+        // Signal 7: Known model provider resolved (+10)
+        if model_provider.is_some() {
+            score = score.saturating_add(10);
+        }
+
+        // Signal 8: Long-running process (sustained CPU use) (+5)
+        if cpu_ticks > 1000.0 {
             score = score.saturating_add(5);
         }
 
         score.min(100)
     }
 
-    fn detect_model_provider(&self, cmdline: &str, env_vars: &[String]) -> Option<String> {
+    fn detect_model_provider(&self, cmdline: &str, raw_env_vars: &[String]) -> Option<String> {
         let cmdline_lower = cmdline.to_lowercase();
 
-        if cmdline_lower.contains("openai") || cmdline_lower.contains("gpt") {
-            Some("OpenAI".to_string())
-        } else if cmdline_lower.contains("anthropic") || cmdline_lower.contains("claude") {
+        if cmdline_lower.contains("anthropic") || cmdline_lower.contains("claude") {
             Some("Anthropic".to_string())
+        } else if cmdline_lower.contains("openai") || cmdline_lower.contains("gpt") {
+            Some("OpenAI".to_string())
         } else if cmdline_lower.contains("gemini") || cmdline_lower.contains("google") {
             Some("Google".to_string())
-        } else if env_vars.iter().any(|e| e == "OPENAI_API_KEY") {
-            Some("OpenAI".to_string())
-        } else if env_vars.iter().any(|e| e == "ANTHROPIC_API_KEY") {
+        } else if cmdline_lower.contains("ollama") || cmdline_lower.contains("llama") || cmdline_lower.contains("mistral") {
+            Some("Local/Ollama".to_string())
+        } else if raw_env_vars.iter().any(|e| e == "ANTHROPIC_API_KEY") {
             Some("Anthropic".to_string())
+        } else if raw_env_vars.iter().any(|e| e == "OPENAI_API_KEY") {
+            Some("OpenAI".to_string())
+        } else if raw_env_vars.iter().any(|e| e.contains("GROQ") || e.contains("TOGETHER") || e.contains("OPENROUTER")) {
+            Some("Multi-provider".to_string())
         } else {
             None
         }
     }
-}
 
+    /// Scan active TCP connections and return a map of PID → provider name
+    /// for any process that currently has an open connection to an LLM provider API.
+    ///
+    /// Cached for 30 seconds. LLM provider IPs are resolved once per refresh cycle
+    /// so the hot path is a simple HashSet lookup, not a DNS query.
+    fn refresh_llm_connections(&self) {
+        let needs_refresh = {
+            let cache = self.llm_conn_cache.lock().unwrap();
+            cache.refreshed_at.elapsed() > Duration::from_secs(30)
+        };
+        if !needs_refresh {
+            return;
+        }
+
+        // Step 1: resolve all LLM provider hostnames to IPs (once per refresh cycle).
+        use std::net::ToSocketAddrs;
+        let mut provider_ips: HashMap<String, &str> = HashMap::new();
+        for (hostname, provider) in LLM_PROVIDER_HOSTS {
+            if let Ok(addrs) = format!("{}:443", hostname).to_socket_addrs() {
+                for addr in addrs {
+                    provider_ips.insert(addr.ip().to_string(), provider);
+                }
+            }
+        }
+
+        // Step 2: enumerate active HTTPS connections with lsof (-F = field output).
+        // p<pid>  →  n<local->remote>
+        let mut pids: HashSet<u32> = HashSet::new();
+        let mut providers: HashMap<u32, String> = HashMap::new();
+
+        if let Ok(out) = std::process::Command::new("lsof")
+            .args(["-n", "-P", "-i", "TCP:443", "-sTCP:ESTABLISHED", "-F", "pn"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut current_pid: Option<u32> = None;
+            for line in text.lines() {
+                if let Some(pid_str) = line.strip_prefix('p') {
+                    current_pid = pid_str.parse().ok();
+                } else if let Some(addr) = line.strip_prefix('n') {
+                    if let Some(pid) = current_pid {
+                        // addr: 1.2.3.4:port->5.6.7.8:443  or  [::1]:port->[::1]:443
+                        if let Some(remote) = addr.split("->").nth(1) {
+                            let remote_ip = remote
+                                .split(':').next().unwrap_or("")
+                                .trim_matches('[').trim_matches(']');
+                            if let Some(&provider) = provider_ips.get(remote_ip) {
+                                pids.insert(pid);
+                                providers.entry(pid).or_insert_with(|| provider.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut cache = self.llm_conn_cache.lock().unwrap();
+        cache.pids = pids;
+        cache.providers = providers;
+        cache.refreshed_at = Instant::now();
+    }
+}
 #[cfg(target_os = "linux")]
 /// Estimate a process's CPU usage as a percentage of total system uptime.
 /// Uses `/proc/uptime` to get the system uptime in seconds.
