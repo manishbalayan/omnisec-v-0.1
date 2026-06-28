@@ -4,7 +4,7 @@
 //! resolves PIDs to agent identities, and publishes structured events to NATS.
 //!
 //! Architecture:
-//! ```
+//! ```text
 //! eBPF kernel programs (tracepoints)
 //!   ↓ Ring Buffer (mmap'd shared memory)
 //! eBPF userspace (this crate)

@@ -42,7 +42,10 @@ jobs:
           restore-keys: cert-cargo-
 
       - name: "Phase 1 — Install (build from source, native services)"
-        run: sudo -E sh deploy/install.sh --build
+        # sudo resets PATH via secure_path, so -E alone won't expose the cargo/node
+        # that the toolchain actions installed for the runner user. Forward the
+        # runner's PATH and HOME explicitly so --build can find them.
+        run: sudo env "PATH=$PATH" "HOME=$HOME" sh deploy/install.sh --build
 
       - name: "Phase 2 — Native service status"
         run: |
@@ -97,7 +100,7 @@ jobs:
       - name: "Phase 7 — Upgrade + uninstall paths"
         run: |
           set -e
-          sudo -E sh deploy/install.sh --build      # re-run = idempotent upgrade
+          sudo env "PATH=$PATH" "HOME=$HOME" sh deploy/install.sh --build   # re-run = idempotent upgrade
           systemctl is-active --quiet omnisec-daemon && echo "✓ upgrade (re-install) keeps daemon active"
           sudo sh deploy/install.sh --uninstall
           ! systemctl is-active --quiet omnisec-daemon && echo "✓ uninstall stopped services"

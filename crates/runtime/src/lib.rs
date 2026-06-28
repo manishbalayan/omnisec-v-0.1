@@ -26,11 +26,34 @@ pub enum RuntimeMode {
     Simulated,
 }
 
-/// Detect if we're running on a platform with native enforcement capabilities.
+/// Detect the runtime enforcement mode.
 ///
-/// Linux: nftables, cgroups, inotify, /proc all available.
-/// macOS: pf, kqueue, sysctl all available.
+/// Resolution order (first match wins):
+///   1. `OMNISEC_RUNTIME_MODE` — explicit override (`native`/`enforce` or
+///      `simulated`/`observe`). Used by tests and by operators who want to
+///      pin behavior regardless of platform.
+///   2. `OMNISEC_SAFE_MODE=1` — safe mode. Enforcement is logged but never
+///      applied (no nftables/pf rules, no SIGSTOP/KILL, no cgroup writes).
+///      This is the same knob the daemon surfaces as "SAFE MODE ACTIVE".
+///   3. Platform default — Native on Linux/macOS (real kernel enforcement),
+///      Simulated everywhere else.
+///
+/// Native mode performs privileged kernel operations and therefore requires
+/// root. Safe/simulated mode performs no privileged operations, which is why
+/// CI and unprivileged environments run with it.
 pub fn detect_runtime_mode() -> RuntimeMode {
+    if let Ok(v) = std::env::var("OMNISEC_RUNTIME_MODE") {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "native" | "enforce" | "enforcing" => return RuntimeMode::Native,
+            "simulated" | "simulate" | "observe" | "dry-run" => return RuntimeMode::Simulated,
+            other => tracing::warn!("Unknown OMNISEC_RUNTIME_MODE='{}' — ignoring", other),
+        }
+    }
+
+    if std::env::var("OMNISEC_SAFE_MODE").as_deref() == Ok("1") {
+        return RuntimeMode::Simulated;
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         RuntimeMode::Native
