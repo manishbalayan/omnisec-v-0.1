@@ -56,7 +56,7 @@
 - **Design Partner Mode** — `OMNISEC_SAFE_MODE=1`: logs all enforcement, applies none; `OMNISEC_RECOMMENDATION_ONLY=1`: decision engine runs, no kernel actions; `OMNISEC_VERBOSE=1`: extended logging
 - **Dashboard** — Next.js 14 with 4 pages: overview, security, reliability, enforcement
 - **API** — Axum 0.7; 28 endpoints; static API key authentication
-- **All-in-One Deployment** — Single container: PostgreSQL 16, NATS 2, API, Daemon, Dashboard
+- **Host-Native Deployment** — Native services (systemd/launchd) for PostgreSQL, NATS, API, Daemon, Dashboard. No Docker, no containers.
 
 ### Alerting
 - **Telegram** — Real Telegram Bot API integration with HTML parse mode
@@ -75,7 +75,7 @@
 | **No Billing / Licensing** | No payment infrastructure | Manual invoicing |
 | **Stateless Daemon** | Restart wipes all baselines, fingerprints, enforcement state | Minimize daemon restarts; monitor uptime |
 | **eBPF Not Compiled** | Falls back to `/proc` polling (1s resolution, no syscall-level data) | Accept `/proc` fallback; plan Linux CI build |
-| **nftables Not Bundled** | `nft` command needed for enforcement but not included | Add `nftables` to apt install list in Dockerfile.all-in-one if enforcement is tested |
+| **nftables Not Bundled** | `nft` command needed for enforcement | Install `nftables` via the host package manager (`apt install nftables`) |
 | **Hardcoded Known Destinations** | 7 entries only; any other AI API produces false positives | Run in SAFE_MODE during baseline period |
 | **No cgroup Verification** | CPU/memory limits written but success not confirmed | Monitor `/sys/fs/cgroup` manually |
 | **Email Alerts Stub** | Email channel logs but does not send | Use Telegram or Slack |
@@ -88,25 +88,20 @@
 ## Deployment Notes
 
 ### Minimum Requirements
-- Linux kernel ≥ 5.4 (for inotify + nftables support)
-- Docker
-- Capabilities: `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`
-- PostgreSQL 16, NATS 2 (bundled in all-in-one image)
+- Linux kernel ≥ 5.4 (for inotify + nftables support) or macOS 12+
+- root (the installer runs with `sudo`)
+- PostgreSQL 16 and NATS 2 — installed automatically by the installer (native, not containers)
+- The daemon runs as root for native host capabilities (ptrace, nftables/pf, cgroups)
 
 ### Quick Start (Design Partner)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sudo sh
 ```
 
-Or run directly:
-```bash
-docker run -d --name omnisec \
-  -p 3000:3000 \
-  -v omnisec_data:/var/lib/omnisec \
-  --restart unless-stopped \
-  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add DAC_READ_SEARCH \
-  omnisec/omnisec
-```
+Everything is installed and managed as native services — systemd units on Linux,
+launchd plists on macOS. Manage with `systemctl`/`launchctl`, or run
+`sudo omnisec-doctor` for diagnostics. Uninstall with
+`sudo sh deploy/install.sh --uninstall`.
 
 ### Recommended Initial Config (Safe Mode)
 ```bash

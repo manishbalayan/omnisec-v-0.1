@@ -195,7 +195,7 @@
                     <span style="margin-left: 12px; font-size: 13px; color: #52525b;">bash — omnisec install</span>
                 </div>
                 <div class="terminal-body">
-                    <span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh <span style="color: #818cf8;">|</span> sh
+                    <span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh <span style="color: #818cf8;">|</span> sudo sh
                 </div>
             </div>
 
@@ -253,7 +253,7 @@
 
     <script>
         function copyCommand() {
-            const text = 'curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh';
+            const text = 'curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sudo sh';
             navigator.clipboard.writeText(text).then(() => {
                 const btn = document.getElementById('copyBtn');
                 const icon = document.getElementById('copyIcon');

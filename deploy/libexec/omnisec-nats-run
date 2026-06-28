@@ -1,0 +1,9 @@
+#!/bin/sh
+# OmniSec-managed NATS launcher (foreground, JetStream enabled, loopback only).
+set -eu
+. /usr/local/libexec/omnisec/omnisec-env.sh
+
+STORE="${OMNISEC_NATS_STORE:-/var/lib/omnisec/nats}"
+PORT="${NATS_PORT:-4222}"
+
+exec nats-server -js --addr 127.0.0.1 --port "${PORT}" --store_dir "${STORE}"

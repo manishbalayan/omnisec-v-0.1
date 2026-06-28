@@ -46,15 +46,9 @@ const LLM_PROVIDER_HOSTS: &[(&str, &str)] = &[
 ];
 
 /// Returns the proc mount path to use for agent discovery.
-/// When running in a Docker container with `-v /proc:/host/proc:ro`,
-/// we read from `/host/proc` to see host processes. Falls back to `/proc`.
+/// OmniSec runs host-natively, so this is always the host `/proc`.
 pub fn proc_root() -> &'static str {
-    // Check if /host/proc exists (Docker host proc mount from install.sh)
-    if std::path::Path::new("/host/proc").exists() {
-        "/host/proc"
-    } else {
-        "/proc"
-    }
+    "/proc"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

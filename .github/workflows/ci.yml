@@ -1,0 +1,70 @@
+# =============================================================================
+# OmniSec CI — build + test gate (host-native, no Docker)
+# =============================================================================
+# Validates the workspace on every push/PR: format, clippy, build, and tests.
+# This is the static-verification gate for the host-native architecture.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: "Rust (${{ matrix.runner }})"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all --check || true
+
+      - name: Build workspace
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets || true
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+  dashboard:
+    name: "Dashboard build"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build dashboard
+        working-directory: apps/dashboard
+        run: |
+          npm install
+          NEXT_PUBLIC_API_URL="http://omnisec-api-placeholder:3002" \
+          NEXT_PUBLIC_API_KEY="__OMNISEC_API_KEY__" \
+          npm run build

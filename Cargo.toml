@@ -11,8 +11,6 @@ members = [
     "crates/storage",
     "crates/alerts",
     "crates/reliability",
-    "crates/restart",
-    "crates/systemd",
     "crates/chaos",
     "crates/decision",
     "crates/enforcement",
@@ -62,8 +60,6 @@ omnisec-discovery = { path = "crates/discovery" }
 omnisec-storage = { path = "crates/storage" }
 omnisec-alerts = { path = "crates/alerts" }
 omnisec-reliability = { path = "crates/reliability" }
-omnisec-restart = { path = "crates/restart" }
-omnisec-systemd = { path = "crates/systemd" }
 omnisec-chaos = { path = "crates/chaos" }
 omnisec-decision = { path = "crates/decision" }
 omnisec-enforcement = { path = "crates/enforcement" }

@@ -4,14 +4,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Returns the proc mount path to use for monitoring.
-/// When running in a Docker container with `-v /proc:/host/proc:ro`,
-/// we read from `/host/proc` to see host processes. Falls back to `/proc`.
+/// OmniSec runs host-natively, so this is always the host `/proc`.
 fn proc_root() -> &'static str {
-    if std::path::Path::new("/host/proc").exists() {
-        "/host/proc"
-    } else {
-        "/proc"
-    }
+    "/proc"
 }
 
 // ---------------------------------------------------------------------------

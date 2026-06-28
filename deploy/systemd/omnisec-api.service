@@ -1,0 +1,21 @@
+[Unit]
+Description=OmniSec API — read-only REST API for the dashboard
+Documentation=https://github.com/manishbalayan/omnisec-v-0.1
+After=omnisec-postgres.service
+Requires=omnisec-postgres.service
+PartOf=omnisec.target
+
+[Service]
+Type=simple
+User=omnisec
+Group=omnisec
+ExecStart=/usr/local/libexec/omnisec/omnisec-api-run
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=omnisec.target

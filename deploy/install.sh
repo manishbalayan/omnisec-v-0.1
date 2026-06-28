@@ -1,970 +1,613 @@
 #!/bin/sh
 # =============================================================================
-# OmniSec One-Command Installer
+# OmniSec — Host-Native Installer
 # =============================================================================
-# Fully POSIX-compatible — works with sh, dash, bash, zsh.
-# Uses printf instead of echo -e for portable escape sequences,
-# avoids arrays and bash-specific redirections.
+# Installs OmniSec as professional infrastructure software — no Docker, no
+# containers. Everything runs directly on the host as native services
+# (systemd on Linux, launchd on macOS).
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/manishbalayan/omnisec-v-0.1/main/deploy/install.sh | sudo sh
 #
-# What it does:
-#   1. Detects OS and architecture
-#   2. Checks prerequisites (curl, Docker)
-#   3. Downloads correct daemon binary from GitHub Releases
-#   4. Verifies SHA256 checksum
-#   5. Installs daemon binary to /usr/local/bin/
-#   6. Creates systemd service (Linux) or launchd plist (macOS)
-#   7. Starts daemon
-#   8. Starts Docker control plane stack
-#   9. Verifies all services
-#  10. Prints access URLs
+# Flow:
+#   detect OS/arch -> create service user -> create directories ->
+#   install PostgreSQL + NATS (native) -> download OmniSec binaries + dashboard ->
+#   install launchers + config -> initialize database -> register services ->
+#   start services in order -> verify each -> done.
 #
-# Requirements: curl, Docker
-# No Rust/Cargo/compilation needed on the target machine.
+# Flags:
+#   --uninstall        Remove all OmniSec services, binaries, and data.
+#   --version <tag>    Install a specific release tag.
+#   --build            Build binaries from source (requires cargo + node).
+#
+# Fully POSIX (sh/dash/bash/zsh). Requires root (run with sudo).
 # =============================================================================
 
 set -eu
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Configuration
-# =============================================================================
+# -----------------------------------------------------------------------------
 REPO_OWNER="${GITHUB_REPO_OWNER:-manishbalayan}"
 REPO_NAME="${GITHUB_REPO_NAME:-omnisec-v-0.1}"
-RELEASE_TAG="${OMNISEC_VERSION:-v0.1.0-daemon}"
-GITHUB_RELEASES="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}"
+RELEASE_TAG="${OMNISEC_VERSION:-v0.1.0}"
+GH_RELEASES="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}"
+NATS_VERSION="${OMNISEC_NATS_VERSION:-2.10.21}"
 
-DEFAULT_DASHBOARD_PORT=3000
-DEFAULT_API_PORT=3002
-DEFAULT_DAEMON_HEALTH_PORT=3003
-DEFAULT_POSTGRES_PORT=5432
-DEFAULT_NATS_PORT=4222
+DASHBOARD_PORT="${OMNISEC_DASHBOARD_PORT:-3000}"
+API_PORT="${OMNISEC_API_PORT:-3002}"
+DAEMON_HEALTH_PORT="${OMNISEC_DAEMON_HEALTH_PORT:-3003}"
+POSTGRES_PORT="${OMNISEC_POSTGRES_PORT:-5432}"
+NATS_PORT="${OMNISEC_NATS_PORT:-4222}"
 
-INSTALL_DIR="/usr/local/bin"
-DAEMON_BIN="${INSTALL_DIR}/omnisec-daemon"
-LOG_DIR="/var/log/omnisec"
+INSTALL_BIN="/usr/local/bin"
+LIBEXEC_DIR="/usr/local/libexec/omnisec"
 
-# Colors for output (printf format strings)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+DO_UNINSTALL=0
+DO_BUILD=0
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()    { printf "  ${BLUE}◆${NC} %s\n" "$1"; }
 success() { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 warn()    { printf "  ${YELLOW}⚠${NC} %s\n" "$1"; }
 fail()    { printf "  ${RED}✗${NC} %s\n" "$1"; }
-
-# Portable redirection: check if a command exists
+step()    { printf "\n━━━ %s ━━━\n" "$1"; }
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+die()     { fail "$1"; exit 1; }
 
-# Detect if a port is in use (works on Linux and macOS)
-# Uses actual TCP connection attempt as primary method — more reliable than
-# process listing (lsof needs sudo to see other users' processes on macOS)
-port_in_use() {
-    port=$1
-    # Method 1: nc -z — actually tries to connect to the port (most reliable)
-    # Wrap with timeout to prevent hanging on filtered/dropped ports
-    if has_cmd nc; then
-        if has_cmd timeout; then
-            timeout 3 nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0 || return 1
-        else
-            nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0 || return 1
-        fi
-    fi
-    # Method 2: ss — fast, Linux only
-    if has_cmd ss; then
-        ss -tlnp "sport = :$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
-    fi
-    # Method 3: lsof with sudo fallback (needed on macOS for other users' processes)
-    if has_cmd lsof; then
-        lsof -i :"$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
-        # On macOS, lsof without sudo may miss processes owned by other users
-        if [ "${OS}" = "Darwin" ]; then
-            sudo lsof -i :"$port" 2>/dev/null | grep -q LISTEN && return 0 || return 1
-        fi
-    fi
-    # Method 4: netstat
-    if has_cmd netstat; then
-        netstat -an 2>/dev/null | grep -q "LISTEN.*:$port " && return 0 || return 1
-    fi
-    # Method 5: Python socket bind test (most portable fallback)
-    if has_cmd python3; then
-        python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $port)); s.close()" 2>/dev/null && return 1 || return 0
-    fi
-    # Method 6: /dev/tcp (bash-specific, but works on many systems)
-    (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null && return 0 || return 1
-}
-
-# Track in-memory allocated ports to prevent conflicts
-ALLOCATED_PORTS=""
-
-already_allocated() {
-    port=$1
-    for ap in $ALLOCATED_PORTS; do
-        [ "$ap" = "$port" ] && return 0
-    done
-    return 1
-}
-
-find_free_port() {
-    port=$1
-    max_port="${2:-$((port + 100))}"
-    while [ "$port" -le "$max_port" ]; do
-        if ! port_in_use "$port" && ! already_allocated "$port"; then
-            ALLOCATED_PORTS="$ALLOCATED_PORTS $port"
-            printf "%s" "$port"
-            return 0
-        fi
-        port=$((port + 1))
-    done
-    printf ""
-    return 1
-}
-
-# Platform-specific checksum verification.
-# Each binary ships with a single-line .sha256 file: "<hash>  <binary_name>"
-# We take the first field of the first line — no filename grep needed.
-verify_checksum() {
-    file=$1
-    checksum_file=$2
-
-    if has_cmd sha256sum; then
-        ACTUAL_CHECKSUM=$(sha256sum "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
-    elif has_cmd shasum; then
-        ACTUAL_CHECKSUM=$(shasum -a 256 "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
-    elif has_cmd gsha256sum; then
-        ACTUAL_CHECKSUM=$(gsha256sum "$file" | awk '{print $1}')
-        STATED_CHECKSUM=$(awk 'NR==1{print $1}' "$checksum_file")
-    else
-        warn "No checksum tool found (tried sha256sum, shasum, gsha256sum)"
-        return 1
-    fi
-
-    if [ -n "$STATED_CHECKSUM" ] && [ "$ACTUAL_CHECKSUM" = "$STATED_CHECKSUM" ]; then
-        return 0
-    else
-        warn "Checksum mismatch"
-        warn "  Expected: ${STATED_CHECKSUM}"
-        warn "  Got:      ${ACTUAL_CHECKSUM}"
-        return 1
-    fi
-}
-
-parse_json_array_len() {
-    json=$1
-    key="${2:-agents}"
-    if has_cmd python3; then
-        printf "%s" "$json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('$key', [])))" 2>/dev/null || printf "0"
-    elif has_cmd jq; then
-        printf "%s" "$json" | jq ".[\"$key\"] | length" 2>/dev/null || printf "0"
-    else
-        printf "0"
-    fi
-}
-
-# Get file size in bytes (portable)
-file_size_bytes() {
-    fpath=$1
-    if has_cmd stat; then
-        # Try GNU stat first, then BSD stat
-        stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || printf "0"
-    elif has_cmd wc; then
-        wc -c < "$fpath" 2>/dev/null || printf "0"
-    else
-        printf "0"
-    fi
-}
-
-# =============================================================================
-# Main Installation Flow
-# =============================================================================
-
-printf "\n"
-printf "╔═══════════════════════════════════════════════════════════════╗\n"
-printf "║         OmniSec Reliability v0.1 — One-Command Install       ║\n"
-printf "╚═══════════════════════════════════════════════════════════════╝\n"
-printf "\n"
-
-# =============================================================================
-# Step 1: Platform Detection
-# =============================================================================
-printf "━━━ Step 1: Platform Detection ━━━\n"
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-
-info "OS:   ${OS}"
-info "Arch: ${ARCH}"
-
-case "${OS}" in
-    Linux|Darwin) ;;
-    *)
-        fail "Unsupported OS: ${OS}. OmniSec requires Linux or macOS."
-        exit 1
-        ;;
-esac
-
-case "${ARCH}" in
-    x86_64)  BINARY_ARCH="amd64" ;;
-    aarch64|arm64) BINARY_ARCH="arm64" ;;
-    *)
-        fail "Unsupported architecture: ${ARCH}"
-        exit 1
-        ;;
-esac
-
-# Determine OS tag for binary download
-case "${OS}" in
-    Linux)  OS_TAG="linux" ;;
-    Darwin) OS_TAG="darwin" ;;
-esac
-
-# Binary name: try platform-specific first, fall back to generic
-BINARY_NAME_OS_ARCH="omnisec-daemon-${OS_TAG}-${BINARY_ARCH}"
-BINARY_NAME_ARCH="omnisec-daemon-${BINARY_ARCH}"
-
-success "Detected ${OS_TAG}/${BINARY_ARCH}"
-printf "\n"
-
-# =============================================================================
-# Step 2: Prerequisites Check
-# =============================================================================
-printf "━━━ Step 2: Prerequisites ━━━\n"
-
-# Check curl
-if ! has_cmd curl; then
-    fail "curl is required. Install it first."
-    exit 1
-fi
-success "curl found"
-
-# Auto-install Docker if not found (Linux only)
-if ! has_cmd docker; then
-    if [ "${OS}" = "Linux" ]; then
-        info "Docker not found — installing via get.docker.com..."
-        curl -fsSL https://get.docker.com | sh 2>&1 || {
-            fail "Docker installation failed. Install manually:"
-            printf "    curl -fsSL https://get.docker.com | sh\n"
-            exit 1
-        }
-        success "Docker installed"
-    else
-        fail "Docker not found. Install Docker Desktop first:"
-        printf "    https://docs.docker.com/desktop/install/mac-install/\n"
-        exit 1
-    fi
-fi
-
-# Now check Docker daemon status
-DOCKER_VERSION=$(docker --version 2>/dev/null || printf "Docker CLI")
-success "${DOCKER_VERSION}"
-
-_check_docker_running() {
-    docker info >/dev/null 2>&1 && return 0
-    # Fallback: try sudo docker info (for users not in the docker group on Linux)
-    if [ "${OS}" = "Linux" ]; then
-        sudo docker info >/dev/null 2>&1 && return 0
-    fi
-    return 1
-}
-
-if ! _check_docker_running; then
-    warn "Docker daemon is not running — attempting to start"
-    case "${OS}" in
-        Linux)
-            # Try multiple methods to start Docker daemon
-            if has_cmd systemctl; then
-                sudo systemctl enable docker 2>/dev/null || true
-                sudo systemctl start docker 2>/dev/null || true
-            fi
-            if ! _check_docker_running; then
-                sudo service docker start 2>/dev/null || true
-            fi
-            # Last resort: start dockerd directly
-            if ! _check_docker_running && has_cmd dockerd; then
-                info "Starting dockerd directly..."
-                sudo dockerd >/dev/null 2>&1 &
-                sleep 3
-            fi
-            ;;
-        Darwin)
-            open -a Docker 2>/dev/null || true
-            warn "If Docker Desktop doesn't start automatically, open it manually"
-            ;;
+# -----------------------------------------------------------------------------
+# Argument parsing
+# -----------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uninstall) DO_UNINSTALL=1 ;;
+        --build)     DO_BUILD=1 ;;
+        --version)   shift; RELEASE_TAG="$1"; GH_RELEASES="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${RELEASE_TAG}" ;;
+        *) warn "Unknown argument: $1" ;;
     esac
-
-    info "Waiting for Docker daemon (up to 120s)..."
-    attempt=0
-    while ! _check_docker_running && [ "$attempt" -lt 12 ]; do
-        sleep 10
-        attempt=$((attempt + 1))
-    done
-    if ! _check_docker_running; then
-        fail "Docker daemon could not be started after retries"
-        warn "Try starting Docker manually:"
-        if [ "${OS}" = "Linux" ]; then
-            printf "    sudo dockerd > /dev/null 2>&1 &\n"
-            printf "    # then re-run this installer\n"
-        else
-            printf "    Open Docker Desktop application\n"
-        fi
-        exit 1
-    fi
-    success "Docker daemon is now running"
-else
-    success "Docker daemon is running"
-fi
-printf "\n"
-
-# =============================================================================
-# Step 3: Stop Existing Installation
-# =============================================================================
-printf "━━━ Step 3: Clean Up Existing Installation ━━━\n"
-
-# Stop daemon if running
-if has_cmd omnisec-daemon || [ -f "${DAEMON_BIN}" ]; then
-    warn "Existing installation found. Cleaning up..."
-
-    # Stop systemd service (Linux)
-    if [ "${OS}" = "Linux" ] && systemctl is-active --quiet omnisec-daemon 2>/dev/null; then
-        sudo systemctl stop omnisec-daemon 2>/dev/null || true
-        sudo systemctl disable omnisec-daemon 2>/dev/null || true
-    fi
-
-    # Stop launchd service (macOS)
-    if [ "${OS}" = "Darwin" ] && [ -f /Library/LaunchDaemons/com.omnisec.daemon.plist ]; then
-        sudo launchctl unload /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
-    fi
-
-    # Kill any running daemon process
-    pkill -f omnisec-daemon 2>/dev/null || true
-
-    warn "Removing old binary and configuration..."
-    sudo rm -f "${DAEMON_BIN}" 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/omnisec-daemon.service 2>/dev/null || true
-    sudo rm -f /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
-fi
-
-# Stop and remove Docker container
-if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$"; then
-    warn "Existing Docker container found. Stopping and removing..."
-    docker stop omnisec >/dev/null 2>&1 || true
-    docker rm omnisec >/dev/null 2>&1 || true
-fi
-
-success "Cleanup complete"
-printf "\n"
-
-# =============================================================================
-# Step 4: Download Daemon Binary
-# =============================================================================
-printf "━━━ Step 4: Downloading Daemon Binary ━━━\n"
-
-# Try platform-specific binary first, fall back to generic
-BINARY_URL="${GITHUB_RELEASES}/${BINARY_NAME_OS_ARCH}"
-FALLBACK_URL="${GITHUB_RELEASES}/${BINARY_NAME_ARCH}"
-
-# Create temp directory
-TMP_DIR=$(mktemp -d)
-trap 'rm -rf "${TMP_DIR}"' EXIT
-
-info "Downloading omnisec-daemon binary..."
-if curl -fsSL "${BINARY_URL}" -o "${TMP_DIR}/omnisec-daemon" 2>/dev/null; then
-    info "Downloaded: ${BINARY_NAME_OS_ARCH}"
-elif curl -fsSL "${FALLBACK_URL}" -o "${TMP_DIR}/omnisec-daemon" 2>/dev/null; then
-    info "Downloaded: ${BINARY_NAME_ARCH} (generic fallback)"
-else
-    fail "Failed to download binary from:"
-    printf "    %s\n" "${BINARY_URL}"
-    printf "\n"
-    warn "Possible issues:"
-    printf "    • Release %s may not have binaries for %s/%s\n" "${RELEASE_TAG}" "${OS_TAG}" "${BINARY_ARCH}"
-    printf "    • Check releases: https://github.com/%s/%s/releases\n" "${REPO_OWNER}" "${REPO_NAME}"
-    exit 1
-fi
-
-# Verify file is not empty
-if [ ! -s "${TMP_DIR}/omnisec-daemon" ]; then
-    fail "Downloaded binary is empty. Release may not have correct assets."
-    exit 1
-fi
-
-# Check binary size — real daemon should be several MB, not a few KB
-BINARY_SIZE=$(file_size_bytes "${TMP_DIR}/omnisec-daemon")
-if [ "$BINARY_SIZE" -lt 1000000 ] 2>/dev/null; then
-    warn "Binary is only ${BINARY_SIZE} bytes — expected a multi-MB executable"
-    warn "This may be a placeholder or broken release asset."
-    warn "Release: https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${RELEASE_TAG}"
-fi
-
-chmod +x "${TMP_DIR}/omnisec-daemon"
-success "Binary downloaded ($(du -h "${TMP_DIR}/omnisec-daemon" | cut -f1))"
-printf "\n"
-
-# =============================================================================
-# Step 5: Verify SHA256 Checksum
-# =============================================================================
-printf "━━━ Step 5: Verifying Binary Checksum ━━━\n"
-
-CHECKSUM_FILE="${BINARY_NAME_OS_ARCH}.sha256"
-CHECKSUM_FALLBACK="${BINARY_NAME_ARCH}.sha256"
-CHECKSUM_URL="${GITHUB_RELEASES}/${CHECKSUM_FILE}"
-CHECKSUM_URL_FALLBACK="${GITHUB_RELEASES}/${CHECKSUM_FALLBACK}"
-
-if curl -fsSL "${CHECKSUM_URL}" -o "${TMP_DIR}/checksum.sha256" 2>/dev/null; then
-    :
-elif curl -fsSL "${CHECKSUM_URL_FALLBACK}" -o "${TMP_DIR}/checksum.sha256" 2>/dev/null; then
-    :
-else
-    warn "Checksum file not found — skipping verification"
-fi
-
-if [ -f "${TMP_DIR}/checksum.sha256" ]; then
-    if verify_checksum "${TMP_DIR}/omnisec-daemon" "${TMP_DIR}/checksum.sha256"; then
-        success "Checksum verified"
-    else
-        fail "Checksum mismatch!"
-        exit 1
-    fi
-fi
-printf "\n"
-
-# =============================================================================
-# Step 6: Install Daemon Binary
-# =============================================================================
-printf "━━━ Step 6: Installing Daemon Binary ━━━\n"
-
-sudo mkdir -p "${INSTALL_DIR}"
-sudo cp "${TMP_DIR}/omnisec-daemon" "${DAEMON_BIN}"
-sudo chmod 755 "${DAEMON_BIN}"
-
-success "Installed to ${DAEMON_BIN}"
-printf "\n"
-
-# =============================================================================
-# Step 7: Configure and Start Daemon
-# =============================================================================
-printf "━━━ Step 7: Starting OmniSec Daemon ━━━\n"
-
-# Create log directory
-sudo mkdir -p "${LOG_DIR}"
-
-# If the binary is clearly a stub (< 1 MB), skip daemon start but continue
-# to the Docker control plane build. The Docker image builds all binaries
-# from source and runs the daemon inside the container.
-BINARY_SIZE="$(file_size_bytes "${DAEMON_BIN}")"
-if [ "$BINARY_SIZE" -lt 1000000 ] 2>/dev/null; then
-    warn "Daemon binary is only ${BINARY_SIZE} bytes (expected multi-MB) — skipping host daemon start"
-    warn "The Docker control plane will provide complete functionality"
-else
-    case "${OS}" in
-        Linux)
-            # Create systemd service
-            sudo tee /etc/systemd/system/omnisec-daemon.service >/dev/null << 'SERVICE_EOF'
-[Unit]
-Description=OmniSec Daemon - Host-level Process Monitoring
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=notify
-ExecStart=/usr/local/bin/omnisec-daemon
-Restart=always
-RestartSec=10
-Environment=DATABASE_URL=postgres://omnisec:omnisec@localhost:5432/omnisec
-Environment=NATS_URL=nats://localhost:4222
-Environment=OMNISEC_SAFE_MODE=0
-Environment=OMNISEC_RECOMMENDATION_ONLY=0
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-            sudo systemctl daemon-reload
-            sudo systemctl enable omnisec-daemon
-            sudo systemctl start omnisec-daemon
-
-            if systemctl is-active --quiet omnisec-daemon; then
-                success "Systemd service created and daemon started"
-            else
-                warn "Failed to start daemon — continuing without it"
-                warn "The Docker control plane will provide all functionality"
-            fi
-            ;;
-
-        Darwin)
-            # Create launchd plist for macOS
-            sudo tee /Library/LaunchDaemons/com.omnisec.daemon.plist >/dev/null << 'PLIST_EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.omnisec.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/omnisec-daemon</string>
-    </array>
-    <key>KeepAlive</key>
-    <true/>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/omnisec/daemon.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/omnisec/daemon.err</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DATABASE_URL</key>
-        <string>postgres://omnisec:omnisec@localhost:5432/omnisec</string>
-        <key>NATS_URL</key>
-        <string>nats://localhost:4222</string>
-        <key>OMNISEC_SAFE_MODE</key>
-        <string>0</string>
-        <key>OMNISEC_RECOMMENDATION_ONLY</key>
-        <string>0</string>
-        <key>RUST_LOG</key>
-        <string>info</string>
-    </dict>
-</dict>
-</plist>
-PLIST_EOF
-
-            # macOS 12+ (Monterey): launchctl bootstrap; older: launchctl load
-            _macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
-            if [ "${_macos_major:-0}" -ge 12 ] 2>/dev/null; then
-                sudo launchctl bootstrap system /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || \
-                    sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist
-            else
-                sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist
-            fi
-            success "Launchd plist created and daemon started"
-            ;;
-    esac
-fi
-printf "\n"
-
-# =============================================================================
-# Step 8: Wait for Daemon Health
-# =============================================================================
-printf "━━━ Step 8: Waiting for Daemon Health ━━━\n"
-
-info "Waiting for daemon health endpoint (up to 30s)..."
-DAEMON_READY=false
-i=1
-while [ $i -le 30 ]; do
-    if curl -sf http://127.0.0.1:3003/health >/dev/null 2>&1; then
-        DAEMON_READY=true
-        success "Daemon health endpoint responding on port 3003"
-        break
-    fi
-    sleep 1
-    i=$((i + 1))
+    shift
 done
 
-if [ "$DAEMON_READY" = false ]; then
-    warn "Daemon health endpoint not yet responding"
-    warn "Check logs: sudo journalctl -u omnisec-daemon -n 30 (Linux)"
-    warn "           tail -f /var/log/omnisec/daemon.log (macOS)"
-fi
-printf "\n"
+# -----------------------------------------------------------------------------
+# Platform detection (sets OS_KIND, ARCH, and per-OS path layout)
+# -----------------------------------------------------------------------------
+detect_platform() {
+    OS_UNAME="$(uname -s)"
+    ARCH_UNAME="$(uname -m)"
+
+    case "${OS_UNAME}" in
+        Linux)  OS_KIND="linux";  OS_TAG="linux" ;;
+        Darwin) OS_KIND="macos";  OS_TAG="darwin" ;;
+        *) die "Unsupported OS: ${OS_UNAME}. OmniSec requires Linux or macOS." ;;
+    esac
+
+    case "${ARCH_UNAME}" in
+        x86_64|amd64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) die "Unsupported architecture: ${ARCH_UNAME}" ;;
+    esac
+
+    if [ "${OS_KIND}" = "linux" ]; then
+        CONFIG_DIR="/etc/omnisec"
+        DATA_DIR="/var/lib/omnisec"
+        LOG_DIR="/var/log/omnisec"
+        RUN_DIR="/var/run/omnisec"
+        DASH_DIR="/opt/omnisec/dashboard"
+        SERVICE_USER="omnisec"
+        NATS_OS="linux"
+    else
+        CONFIG_DIR="/usr/local/etc/omnisec"
+        DATA_DIR="/usr/local/var/omnisec"
+        LOG_DIR="/usr/local/var/log/omnisec"
+        RUN_DIR="/usr/local/var/run/omnisec"
+        DASH_DIR="/usr/local/opt/omnisec/dashboard"
+        SERVICE_USER="_omnisec"
+        NATS_OS="darwin"
+    fi
+    PGDATA="${DATA_DIR}/postgres"
+    NATS_STORE="${DATA_DIR}/nats"
+    CONFIG_ENV="${CONFIG_DIR}/omnisec.env"
+}
+
+require_root() {
+    if [ "$(id -u)" != "0" ]; then
+        die "OmniSec installer must run as root. Re-run with: sudo sh"
+    fi
+}
+
+# Run a command as the OmniSec service user.
+as_service_user() {
+    if [ "${OS_KIND}" = "linux" ]; then
+        su -s /bin/sh "${SERVICE_USER}" -c "$1"
+    else
+        sudo -u "${SERVICE_USER}" /bin/sh -c "$1"
+    fi
+}
 
 # =============================================================================
-# Step 9: Detect Available Ports
+# UNINSTALL
 # =============================================================================
-printf "━━━ Step 9: Checking Port Availability ━━━\n"
-
-DASHBOARD_PORT=$DEFAULT_DASHBOARD_PORT
-API_PORT=$DEFAULT_API_PORT
-DAEMON_HEALTH_PORT=$DEFAULT_DAEMON_HEALTH_PORT
-POSTGRES_PORT=$DEFAULT_POSTGRES_PORT
-NATS_PORT=$DEFAULT_NATS_PORT
-
-if port_in_use $DASHBOARD_PORT; then
-    NEW_PORT=$(find_free_port $((DASHBOARD_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        fail "Cannot find free port for Dashboard"
-        exit 1
-    fi
-    warn "Port $DASHBOARD_PORT occupied → Dashboard will use port $NEW_PORT"
-    DASHBOARD_PORT=$NEW_PORT
-else
-    success "Dashboard port $DASHBOARD_PORT available"
-fi
-
-if port_in_use $API_PORT; then
-    NEW_PORT=$(find_free_port $((API_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        fail "Cannot find free port for API"
-        exit 1
-    fi
-    warn "Port $API_PORT occupied → API will use port $NEW_PORT"
-    API_PORT=$NEW_PORT
-else
-    success "API port $API_PORT available"
-fi
-
-# Check PostgreSQL port (5432) — this is commonly occupied by local DBs
-if port_in_use $POSTGRES_PORT; then
-    NEW_PORT=$(find_free_port $((POSTGRES_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        warn "Port $POSTGRES_PORT occupied and no alternative found — skipping host PostgreSQL exposure"
-        POSTGRES_PORT=""
-    else
-        warn "Port $POSTGRES_PORT occupied (likely a local PostgreSQL) → using port $NEW_PORT"
-        POSTGRES_PORT=$NEW_PORT
-    fi
-else
-    success "PostgreSQL port $POSTGRES_PORT available"
-fi
-
-# Check NATS port (4222)
-if port_in_use $NATS_PORT; then
-    NEW_PORT=$(find_free_port $((NATS_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        warn "Port $NATS_PORT occupied and no alternative found — skipping host NATS exposure"
-        NATS_PORT=""
-    else
-        warn "Port $NATS_PORT occupied → using port $NEW_PORT"
-        NATS_PORT=$NEW_PORT
-    fi
-else
-    success "NATS port $NATS_PORT available"
-fi
-
-if port_in_use $DAEMON_HEALTH_PORT; then
-    NEW_PORT=$(find_free_port $((DAEMON_HEALTH_PORT + 1)))
-    if [ -z "$NEW_PORT" ]; then
-        fail "Cannot find free port for Daemon Health"
-        exit 1
-    fi
-    warn "Port $DAEMON_HEALTH_PORT occupied → Daemon Health will use port $NEW_PORT"
-    DAEMON_HEALTH_PORT=$NEW_PORT
-else
-    success "Daemon Health port $DAEMON_HEALTH_PORT available"
-fi
-printf "\n"
-
-# =============================================================================
-# Step 10: Start Docker Control Plane
-# =============================================================================
-printf "━━━ Step 10: Starting OmniSec Control Plane ━━━\n"
-
-# Try to pull the Docker image first
-info "Pulling OmniSec Docker image..."
-IMAGE_SOURCE="remote"
-if docker pull manishbalayan/omnisec:v0.1.0 2>/dev/null; then
-    success "Docker image pulled from Docker Hub"
-else
-    warn "Docker Hub image not found (manishbalayan/omnisec:v0.1.0)"
-    info "Attempting to build from source..."
-
-    # Try local build first (when running from a cloned repo)
-    BUILD_DIR=""
-    if [ -f "deploy/Dockerfile.all-in-one" ]; then
-        BUILD_DIR="$(pwd -P 2>/dev/null || pwd)"
-        info "Building from local source at ${BUILD_DIR}"
-    else
-        # When piped (curl | sh), clone the repo to a temp directory
-        info "No local source found — cloning repository..."
-        BUILD_DIR="${TMP_DIR}/omnisec-repo"
-        if has_cmd git; then
-            git clone --depth 1 "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" "${BUILD_DIR}" 2>/dev/null && {
-                info "Repository cloned to ${BUILD_DIR}"
-            } || {
-                warn "Failed to clone repository — skipping Docker control plane"
-                BUILD_DIR=""
-            }
-        else
-            warn "git not found — cannot clone repository"
-            warn "Install git or clone manually: git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
-            BUILD_DIR=""
-        fi
-    fi
-
-    if [ -n "$BUILD_DIR" ] && [ -f "${BUILD_DIR}/deploy/Dockerfile.all-in-one" ]; then
-        info "Building Docker image (this may take 5-10 minutes)..."
-        docker build -t manishbalayan/omnisec:v0.1.0 \
-            -f "${BUILD_DIR}/deploy/Dockerfile.all-in-one" \
-            "${BUILD_DIR}" 2>&1 && {
-            success "Docker image built from source"
-            IMAGE_SOURCE="local"
-        } || {
-            warn "Local build failed — skipping Docker control plane"
-            warn "The host daemon is still installed at ${DAEMON_BIN}"
-            IMAGE_SOURCE="none"
-        }
-    else
-        warn "Cannot build Docker image — skipping Docker control plane"
-        warn "The host daemon is still installed at ${DAEMON_BIN}"
-        IMAGE_SOURCE="none"
-    fi
-fi
-
-if [ "$IMAGE_SOURCE" = "none" ]; then
-    warn "Continuing with host daemon only (no Docker control plane)"
-else
-    # =========================================================================
-    # Extract the real daemon binary from the freshly-built Docker image
-    # This replaces any placeholder/stub binary (e.g. 12-byte GitHub release
-    # assets from a CI that never ran) with the properly compiled binary.
-    # =========================================================================
-    info "Extracting real daemon binary from Docker image..."
-    docker rm -f omnisec-temp >/dev/null 2>&1 || true
-    docker create --name omnisec-temp manishbalayan/omnisec:v0.1.0 >/dev/null 2>&1 || true
-    docker cp omnisec-temp:/usr/local/bin/omnisec-daemon "${TMP_DIR}/omnisec-daemon-real" >/dev/null 2>&1 || true
-    docker rm omnisec-temp >/dev/null 2>&1 || true
-    if [ -s "${TMP_DIR}/omnisec-daemon-real" ]; then
-        REAL_SIZE=$(file_size_bytes "${TMP_DIR}/omnisec-daemon-real")
-        if [ "$REAL_SIZE" -gt 1000000 ] 2>/dev/null; then
-            sudo cp "${TMP_DIR}/omnisec-daemon-real" "${DAEMON_BIN}"
-            sudo chmod 755 "${DAEMON_BIN}"
-            success "Real daemon binary (${REAL_SIZE} bytes) installed from Docker image"
-            # Restart host daemon with the real binary
-            case "${OS}" in
-                Linux)
-                    if systemctl is-enabled omnisec-daemon >/dev/null 2>&1; then
-                        sudo systemctl start omnisec-daemon 2>/dev/null || true
-                    fi
-                    ;;
-                Darwin)
-                    _macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
-                    if [ "${_macos_major:-0}" -ge 12 ] 2>/dev/null; then
-                        sudo launchctl bootstrap system /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || \
-                            sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
-                    else
-                        sudo launchctl load -w /Library/LaunchDaemons/com.omnisec.daemon.plist 2>/dev/null || true
-                    fi
-                    ;;
-            esac
-        else
-            warn "Extracted binary is only ${REAL_SIZE} bytes — keeping existing binary"
-        fi
-    else
-        warn "Could not extract daemon binary from Docker image"
-    fi
-    printf "\n"
-
-    # Build docker run command as a shell string (POSIX-compatible, no arrays)
-    DOCKER_CMD="docker run --name omnisec"
-    DOCKER_CMD="${DOCKER_CMD} -p 127.0.0.1:${DASHBOARD_PORT}:3000"
-    DOCKER_CMD="${DOCKER_CMD} -p 127.0.0.1:${API_PORT}:3002"
-
-    # Only expose PostgreSQL if port was successfully allocated
-    if [ -n "$POSTGRES_PORT" ]; then
-        DOCKER_CMD="${DOCKER_CMD} -p 127.0.0.1:${POSTGRES_PORT}:5432"
-    fi
-    # Only expose NATS if port was successfully allocated
-    if [ -n "$NATS_PORT" ]; then
-        DOCKER_CMD="${DOCKER_CMD} -p 127.0.0.1:${NATS_PORT}:4222"
-    fi
-
-    DOCKER_CMD="${DOCKER_CMD} -v omnisec_data:/var/lib/omnisec"
-    DOCKER_CMD="${DOCKER_CMD} --restart unless-stopped"
-    DOCKER_CMD="${DOCKER_CMD} --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add DAC_READ_SEARCH"
-    DOCKER_CMD="${DOCKER_CMD} -e DASHBOARD_PORT=3000"
-    DOCKER_CMD="${DOCKER_CMD} -e OMNISEC_DASHBOARD_EXTERNAL_PORT=${DASHBOARD_PORT}"
-    DOCKER_CMD="${DOCKER_CMD} -e OMNISEC_API_EXTERNAL_PORT=${API_PORT}"
-    DOCKER_CMD="${DOCKER_CMD} -e OMNISEC_DAEMON_HEALTH_EXTERNAL_PORT=${DAEMON_HEALTH_PORT}"
-
-    # On Linux, mount /proc for agent discovery
-    if [ "${OS}" = "Linux" ]; then
-        DOCKER_CMD="${DOCKER_CMD} -v /proc:/host/proc:ro"
-    fi
-
-    DOCKER_CMD="${DOCKER_CMD} -d manishbalayan/omnisec:v0.1.0"
-
-    info "Starting Docker container..."
-    if eval "$DOCKER_CMD" 2>&1; then
-        success "Control plane container started"
-
-        # Wait for container to be healthy
-        info "Waiting for OmniSec to be healthy (up to 120s)..."
-        CONTAINER_READY=false
-        i=1
-        while [ $i -le 60 ]; do
-            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' omnisec 2>/dev/null || printf "starting")
-            if [ "${HEALTH}" = "healthy" ]; then
-                CONTAINER_READY=true
-                success "OmniSec container is healthy!"
-                break
-            fi
-            sleep 2
-            i=$((i + 1))
+uninstall() {
+    step "Uninstalling OmniSec"
+    if [ "${OS_KIND}" = "linux" ]; then
+        for svc in omnisec.target omnisec-dashboard omnisec-api omnisec-daemon omnisec-nats omnisec-postgres; do
+            systemctl stop "${svc}" 2>/dev/null || true
+            systemctl disable "${svc}" 2>/dev/null || true
         done
-
-        if [ "$CONTAINER_READY" = false ]; then
-            warn "Container may still be starting..."
-            warn "Check: docker logs omnisec"
-        fi
+        rm -f /etc/systemd/system/omnisec-*.service /etc/systemd/system/omnisec.target
+        systemctl daemon-reload 2>/dev/null || true
     else
-        fail "Failed to start control plane"
-        warn "Check: docker logs omnisec"
-        warn "The host daemon is still installed at ${DAEMON_BIN}"
+        for lbl in dashboard api daemon nats postgres; do
+            launchctl bootout "system/com.omnisec.${lbl}" 2>/dev/null || \
+                launchctl unload "/Library/LaunchDaemons/com.omnisec.${lbl}.plist" 2>/dev/null || true
+            rm -f "/Library/LaunchDaemons/com.omnisec.${lbl}.plist"
+        done
     fi
-fi
-printf "\n"
+    rm -f "${INSTALL_BIN}/omnisec-daemon" "${INSTALL_BIN}/omnisec-api" "${INSTALL_BIN}/omnisec-doctor"
+    rm -rf "${LIBEXEC_DIR}"
+    success "Services and binaries removed"
+    warn "Data preserved at ${DATA_DIR} and config at ${CONFIG_DIR}"
+    warn "To remove everything: sudo rm -rf ${DATA_DIR} ${CONFIG_DIR} ${LOG_DIR} /opt/omnisec"
+    printf "\n"
+    exit 0
+}
 
 # =============================================================================
-# Step 11: Verify Services
+# Service user + directories
 # =============================================================================
-printf "━━━ Step 11: Service Verification ━━━\n"
-
-OVERALL_PASS=true
-
-# Get API key from container (only if container is running)
-API_KEY=""
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$"; then
-    API_KEY=$(docker exec omnisec cat /var/lib/omnisec/.api_key 2>/dev/null || printf "")
-fi
-
-# 11a. Verify API (with retries — container may still be starting)
-if [ -n "$API_KEY" ]; then
-    info "Verifying API (up to 30s)..."
-    _api_ok=false
-    _api_attempt=1
-    while [ $_api_attempt -le 15 ]; do
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-API-Key: ${API_KEY}" "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || printf "000")
-        if [ "$HTTP_CODE" = "200" ]; then
-            _api_ok=true
-            break
-        fi
-        sleep 2
-        _api_attempt=$((_api_attempt + 1))
-    done
-    if [ "$_api_ok" = true ]; then
-        success "API health endpoint → 200"
-    else
-        fail "API health endpoint → ${HTTP_CODE} (after 30s)"
-        OVERALL_PASS=false
-    fi
-else
-    warn "Skipping API verification (container not running or no API key)"
-fi
-
-# 11b. Verify Dashboard (with retries)
-info "Verifying Dashboard (up to 30s)..."
-_dash_ok=false
-_dash_attempt=1
-while [ $_dash_attempt -le 15 ]; do
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${DASHBOARD_PORT}" 2>/dev/null || printf "000")
-    if [ "$HTTP_CODE" = "200" ]; then
-        _dash_ok=true
-        break
-    fi
-    sleep 2
-    _dash_attempt=$((_dash_attempt + 1))
-done
-if [ "$_dash_ok" = true ]; then
-    success "Dashboard → 200"
-else
-    fail "Dashboard → ${HTTP_CODE} (after 30s)"
-    OVERALL_PASS=false
-fi
-
-# 11c. Verify Daemon Discovery
-info "Verifying host discovery..."
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$" && [ -n "$API_KEY" ]; then
-    AGENTS_JSON=$(curl -s -H "X-API-Key: ${API_KEY}" "http://127.0.0.1:${API_PORT}/api/agents" 2>/dev/null || printf "{}")
-    AGENT_COUNT=$(parse_json_array_len "$AGENTS_JSON" "agents")
-    if [ "$AGENT_COUNT" -gt 0 ] 2>/dev/null; then
-        success "Discovered ${AGENT_COUNT} agents"
-    else
-        warn "No agents discovered yet (daemon may still be scanning)"
-    fi
-else
-    warn "Skipping discovery verification (Docker container not running)"
-fi
-
-# 11d. Verify Docker services
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$"; then
-    info "Verifying Docker services..."
-    for svc in "nats-server" "postgres" "omnisec-api"; do
-        if docker exec omnisec pgrep -x "$svc" >/dev/null 2>&1; then
-            success "Service running: $svc"
+create_service_user() {
+    step "Service User"
+    if [ "${OS_KIND}" = "linux" ]; then
+        if id "${SERVICE_USER}" >/dev/null 2>&1; then
+            success "User ${SERVICE_USER} exists"
         else
-            if docker exec omnisec pgrep -f "$svc" >/dev/null 2>&1; then
-                success "Service running: $svc"
-            else
-                warn "Service not found: $svc"
-            fi
+            useradd --system --no-create-home --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null \
+                || useradd --system --no-create-home --shell /bin/false "${SERVICE_USER}" 2>/dev/null \
+                || adduser --system --no-create-home "${SERVICE_USER}" 2>/dev/null || true
+            success "Created system user ${SERVICE_USER}"
+        fi
+    else
+        if dscl . -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
+            success "User ${SERVICE_USER} exists"
+        else
+            # Pick a free UID in the system range
+            _uid=450
+            while dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}' | grep -q "^${_uid}$"; do
+                _uid=$((_uid + 1))
+            done
+            dscl . -create "/Users/${SERVICE_USER}"
+            dscl . -create "/Users/${SERVICE_USER}" UserShell /usr/bin/false
+            dscl . -create "/Users/${SERVICE_USER}" RealName "OmniSec Service"
+            dscl . -create "/Users/${SERVICE_USER}" UniqueID "${_uid}"
+            dscl . -create "/Users/${SERVICE_USER}" PrimaryGroupID 20
+            dscl . -create "/Users/${SERVICE_USER}" NFSHomeDirectory /var/empty
+            success "Created service user ${SERVICE_USER} (uid ${_uid})"
+        fi
+    fi
+}
+
+create_directories() {
+    step "Directories"
+    for d in "${CONFIG_DIR}" "${DATA_DIR}" "${PGDATA}" "${NATS_STORE}" "${LOG_DIR}" "${RUN_DIR}" "${DASH_DIR}" "${LIBEXEC_DIR}"; do
+        mkdir -p "$d"
+    done
+    # Service user owns data, logs, run dirs (daemon runs as root and can still write)
+    chown -R "${SERVICE_USER}" "${DATA_DIR}" "${LOG_DIR}" "${RUN_DIR}" 2>/dev/null || true
+    chmod 700 "${PGDATA}" 2>/dev/null || true
+    success "Created ${CONFIG_DIR}, ${DATA_DIR}, ${LOG_DIR}, ${DASH_DIR}"
+}
+
+# =============================================================================
+# PostgreSQL (native)
+# =============================================================================
+detect_pgbin() {
+    # Find a directory containing both `postgres` and `initdb`.
+    for cand in \
+        "${OMNISEC_PGBIN:-}" \
+        $(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1) \
+        $(ls -d /usr/pgsql-*/bin 2>/dev/null | sort -V | tail -1) \
+        /usr/local/opt/postgresql@16/bin /usr/local/opt/postgresql@15/bin /opt/homebrew/opt/postgresql@16/bin \
+        /usr/local/bin /usr/bin /opt/homebrew/bin; do
+        [ -n "$cand" ] || continue
+        if [ -x "$cand/postgres" ] && [ -x "$cand/initdb" ]; then
+            printf "%s" "$cand"; return 0
         fi
     done
-fi
+    return 1
+}
 
-printf "\n"
-
-# =============================================================================
-# Step 12: Display Summary
-# =============================================================================
-printf "╔═══════════════════════════════════════════════════════════════╗\n"
-printf "║               OmniSec Installation Complete!                  ║\n"
-printf "╚═══════════════════════════════════════════════════════════════╝\n"
-printf "\n"
-
-case "${OS}" in
-    Linux)
-        printf "  Daemon Service:\n"
-        printf "    Status:  %s\n" "$(systemctl is-active omnisec-daemon 2>/dev/null || printf 'unknown')"
-        printf "    Binary:  %s\n" "${DAEMON_BIN}"
-        printf "    Config:  /etc/systemd/system/omnisec-daemon.service\n"
-        printf "\n"
-        printf "  Daemon Commands:\n"
-        printf "    Logs:    sudo journalctl -u omnisec-daemon -f\n"
-        printf "    Status:  sudo systemctl status omnisec-daemon\n"
-        printf "    Stop:    sudo systemctl stop omnisec-daemon\n"
-        printf "    Start:   sudo systemctl start omnisec-daemon\n"
-        ;;
-    Darwin)
-        printf "  Daemon Service:\n"
-        printf "    Status:  %s\n" "$(sudo launchctl list | grep com.omnisec.daemon | awk '{print $1}' || printf 'loaded')"
-        printf "    Binary:  %s\n" "${DAEMON_BIN}"
-        printf "    Config:  /Library/LaunchDaemons/com.omnisec.daemon.plist\n"
-        printf "\n"
-        printf "  Daemon Commands:\n"
-        printf "    Logs:    tail -f /var/log/omnisec/daemon.log\n"
-        printf "    Stop:    sudo launchctl unload /Library/LaunchDaemons/com.omnisec.daemon.plist\n"
-        printf "    Start:   sudo launchctl load /Library/LaunchDaemons/com.omnisec.daemon.plist\n"
-        ;;
-esac
-printf "\n"
-printf "  Control Plane:\n"
-printf "    Dashboard:  http://localhost:${DASHBOARD_PORT}\n"
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^omnisec$"; then
-    printf "    API:        http://localhost:${API_PORT}\n"
-    if [ -n "$API_KEY" ]; then
-        printf "    API Key:    ${API_KEY}\n"
+install_postgres() {
+    step "PostgreSQL"
+    if PGBIN=$(detect_pgbin); then
+        success "PostgreSQL found at ${PGBIN}"
+        return 0
     fi
-fi
-printf "\n"
-printf "  Documentation:\n"
-printf "    https://github.com/${REPO_OWNER}/${REPO_NAME}\n"
+    info "PostgreSQL not found — installing..."
+    if [ "${OS_KIND}" = "linux" ]; then
+        if has_cmd apt-get; then
+            apt-get update -qq && apt-get install -y postgresql >/dev/null
+        elif has_cmd dnf; then
+            dnf install -y postgresql-server >/dev/null
+        elif has_cmd yum; then
+            yum install -y postgresql-server >/dev/null
+        elif has_cmd pacman; then
+            pacman -Sy --noconfirm postgresql >/dev/null
+        elif has_cmd zypper; then
+            zypper install -y postgresql-server >/dev/null
+        else
+            die "No supported package manager found. Install PostgreSQL manually and re-run."
+        fi
+    else
+        has_cmd brew || die "Homebrew required on macOS. Install from https://brew.sh then re-run."
+        as_service_user "brew install postgresql@16" 2>/dev/null || brew install postgresql@16 >/dev/null
+    fi
+    PGBIN=$(detect_pgbin) || die "PostgreSQL installation did not produce usable binaries."
+    success "PostgreSQL installed at ${PGBIN}"
+}
+
+init_database() {
+    step "Database Initialization"
+    if [ -f "${PGDATA}/PG_VERSION" ]; then
+        success "Database cluster already initialized"
+    else
+        info "Initializing cluster at ${PGDATA}..."
+        chown "${SERVICE_USER}" "${PGDATA}"
+        as_service_user "'${PGBIN}/initdb' -D '${PGDATA}' -U '${SERVICE_USER}' --auth-local=trust --auth-host=scram-sha-256 -E UTF8" >/dev/null
+        # Configure: loopback only, fixed port, socket in RUN_DIR
+        {
+            printf "listen_addresses = '127.0.0.1'\n"
+            printf "port = %s\n" "${POSTGRES_PORT}"
+            printf "unix_socket_directories = '%s'\n" "${RUN_DIR}"
+            printf "max_connections = 100\n"
+            printf "shared_buffers = 128MB\n"
+        } >> "${PGDATA}/postgresql.conf"
+        printf "host all all 127.0.0.1/32 scram-sha-256\n" >> "${PGDATA}/pg_hba.conf"
+        success "Cluster initialized (loopback, port ${POSTGRES_PORT})"
+    fi
+}
+
+bootstrap_db_role() {
+    # Start a temporary instance to create role + db, then it will be managed by the service.
+    info "Creating omnisec role and database..."
+    as_service_user "'${PGBIN}/pg_ctl' -D '${PGDATA}' -o '-p ${POSTGRES_PORT}' -w -t 60 start" >/dev/null 2>&1 || true
+    # Wait for readiness
+    i=0; while [ $i -lt 30 ]; do
+        as_service_user "'${PGBIN}/pg_isready' -h 127.0.0.1 -p ${POSTGRES_PORT}" >/dev/null 2>&1 && break
+        sleep 1; i=$((i + 1))
+    done
+    PSQL="'${PGBIN}/psql' -h 127.0.0.1 -p ${POSTGRES_PORT} -d postgres -tAc"
+    # Role 'omnisec' already exists as the initdb superuser; just set a password.
+    as_service_user "${PSQL} \"ALTER ROLE omnisec WITH LOGIN PASSWORD 'omnisec';\"" >/dev/null 2>&1 || true
+    if ! as_service_user "${PSQL} \"SELECT 1 FROM pg_database WHERE datname='omnisec';\"" 2>/dev/null | grep -q 1; then
+        as_service_user "'${PGBIN}/createdb' -h 127.0.0.1 -p ${POSTGRES_PORT} -O omnisec omnisec" >/dev/null 2>&1 || true
+    fi
+    as_service_user "'${PGBIN}/pg_ctl' -D '${PGDATA}' -w -t 30 stop" >/dev/null 2>&1 || true
+    success "Database 'omnisec' ready"
+}
+
+# =============================================================================
+# NATS (native)
+# =============================================================================
+install_nats() {
+    step "NATS"
+    if has_cmd nats-server; then
+        success "nats-server found ($(nats-server --version 2>/dev/null | head -1))"
+        return 0
+    fi
+    info "Installing nats-server ${NATS_VERSION}..."
+    if [ "${OS_KIND}" = "macos" ] && has_cmd brew; then
+        brew install nats-server >/dev/null && { success "nats-server installed via Homebrew"; return 0; }
+    fi
+    _tgz="nats-server-v${NATS_VERSION}-${NATS_OS}-${ARCH}.tar.gz"
+    _url="https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/${_tgz}"
+    _tmp=$(mktemp -d)
+    if curl -fsSL "${_url}" -o "${_tmp}/nats.tgz" 2>/dev/null; then
+        tar -xzf "${_tmp}/nats.tgz" -C "${_tmp}"
+        _bin=$(find "${_tmp}" -name nats-server -type f | head -1)
+        install -m 755 "${_bin}" "${INSTALL_BIN}/nats-server"
+        rm -rf "${_tmp}"
+        success "nats-server ${NATS_VERSION} installed to ${INSTALL_BIN}"
+    else
+        rm -rf "${_tmp}"
+        die "Failed to download nats-server from ${_url}"
+    fi
+}
+
+# =============================================================================
+# OmniSec binaries + dashboard
+# =============================================================================
+# Portable in-place sed (GNU and BSD).
+sed_inplace() {
+    _expr="$1"; _file="$2"
+    if sed --version >/dev/null 2>&1; then sed -i "${_expr}" "${_file}"; else sed -i '' "${_expr}" "${_file}"; fi
+}
+
+# The dashboard is a client-side app: NEXT_PUBLIC_* are baked into the browser
+# bundle at build time, but the API key is generated at install time. CI builds
+# the bundle with a placeholder key; we patch the real key in here (host-native
+# equivalent of the old container entrypoint sed-patch).
+ensure_api_key() {
+    if [ -z "${OMNISEC_API_KEY:-}" ]; then
+        if has_cmd openssl; then
+            OMNISEC_API_KEY="omnisec-$(openssl rand -hex 24)"
+        else
+            OMNISEC_API_KEY="omnisec-$(head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        fi
+    fi
+}
+
+patch_dashboard() {
+    [ -d "${DASH_DIR}" ] || return 0
+    info "Patching dashboard with API endpoint + key..."
+    find "${DASH_DIR}" -type f \( -name '*.js' -o -name '*.html' -o -name '*.json' \) 2>/dev/null | while read -r f; do
+        grep -q '__OMNISEC_API_KEY__\|omnisec-api-placeholder' "$f" 2>/dev/null || continue
+        sed_inplace "s|__OMNISEC_API_KEY__|${OMNISEC_API_KEY}|g" "$f"
+        sed_inplace "s|http://omnisec-api-placeholder:3002|http://127.0.0.1:${API_PORT}|g" "$f"
+    done
+}
+
+build_from_source() {
+    has_cmd cargo || die "--build requires cargo (https://rustup.rs)"
+    has_cmd node || die "--build requires node"
+    [ -f "Cargo.toml" ] || die "--build must run from the OmniSec repository root"
+    info "Building Rust binaries (release)..."
+    cargo build --release --bin omnisec-daemon --bin omnisec-api --bin omnisec-doctor
+    install -m 755 target/release/omnisec-daemon "${INSTALL_BIN}/omnisec-daemon"
+    install -m 755 target/release/omnisec-api    "${INSTALL_BIN}/omnisec-api"
+    install -m 755 target/release/omnisec-doctor "${INSTALL_BIN}/omnisec-doctor"
+    info "Building dashboard..."
+    # Build with the real key directly (no placeholder patching needed).
+    ( cd apps/dashboard && npm install --silent && \
+        NEXT_PUBLIC_API_URL="http://127.0.0.1:${API_PORT}" \
+        NEXT_PUBLIC_API_KEY="${OMNISEC_API_KEY}" npm run build )
+    rm -rf "${DASH_DIR}"; mkdir -p "${DASH_DIR}"
+    cp -R apps/dashboard/.next/standalone/. "${DASH_DIR}/"
+    mkdir -p "${DASH_DIR}/.next"
+    cp -R apps/dashboard/.next/static "${DASH_DIR}/.next/static"
+    [ -d apps/dashboard/public ] && cp -R apps/dashboard/public "${DASH_DIR}/public" || true
+    success "Built binaries and dashboard from source"
+}
+
+download_artifacts() {
+    step "OmniSec Binaries"
+    if [ "${DO_BUILD}" = "1" ]; then
+        build_from_source
+        return 0
+    fi
+    _tmp=$(mktemp -d)
+    for b in omnisec-daemon omnisec-api omnisec-doctor; do
+        _url="${GH_RELEASES}/${b}-${OS_TAG}-${ARCH}"
+        info "Downloading ${b}..."
+        if ! curl -fsSL "${_url}" -o "${_tmp}/${b}" 2>/dev/null; then
+            rm -rf "${_tmp}"
+            warn "Could not download ${b} for ${OS_TAG}/${ARCH} from ${RELEASE_TAG}."
+            warn "Build from source instead: clone the repo and run 'sudo sh deploy/install.sh --build'"
+            die "Missing release artifact: ${b}-${OS_TAG}-${ARCH}"
+        fi
+        install -m 755 "${_tmp}/${b}" "${INSTALL_BIN}/${b}"
+    done
+    success "Installed omnisec-daemon, omnisec-api, omnisec-doctor to ${INSTALL_BIN}"
+
+    info "Downloading dashboard bundle..."
+    if curl -fsSL "${GH_RELEASES}/omnisec-dashboard.tar.gz" -o "${_tmp}/dash.tgz" 2>/dev/null; then
+        rm -rf "${DASH_DIR}"; mkdir -p "${DASH_DIR}"
+        tar -xzf "${_tmp}/dash.tgz" -C "${DASH_DIR}"
+        patch_dashboard
+        success "Dashboard installed to ${DASH_DIR}"
+    else
+        warn "Dashboard bundle not found in release — dashboard service will be skipped"
+        SKIP_DASHBOARD=1
+    fi
+    rm -rf "${_tmp}"
+    chown -R "${SERVICE_USER}" "${DASH_DIR}" 2>/dev/null || true
+}
+
+# =============================================================================
+# Launchers + config
+# =============================================================================
+install_launchers() {
+    step "Service Launchers + Configuration"
+    # Resolve the directory this script's payload lives in (repo deploy/ or download).
+    _src=""
+    if [ -d "deploy/libexec" ]; then
+        _src="deploy"
+    else
+        # Fetch launchers + service files from the repo when piped via curl.
+        _src=$(mktemp -d)
+        info "Fetching service definitions..."
+        _base="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/deploy"
+        mkdir -p "${_src}/libexec" "${_src}/systemd" "${_src}/launchd"
+        for f in omnisec-env.sh omnisec-postgres-run omnisec-nats-run omnisec-daemon-run omnisec-api-run omnisec-dashboard-run; do
+            curl -fsSL "${_base}/libexec/${f}" -o "${_src}/libexec/${f}" || die "Failed to fetch launcher ${f}"
+        done
+        for f in omnisec-postgres omnisec-nats omnisec-daemon omnisec-api omnisec-dashboard; do
+            curl -fsSL "${_base}/systemd/${f}.service" -o "${_src}/systemd/${f}.service" 2>/dev/null || true
+        done
+        curl -fsSL "${_base}/systemd/omnisec.target" -o "${_src}/systemd/omnisec.target" 2>/dev/null || true
+        for f in postgres nats daemon api dashboard; do
+            curl -fsSL "${_base}/launchd/com.omnisec.${f}.plist" -o "${_src}/launchd/com.omnisec.${f}.plist" 2>/dev/null || true
+        done
+        curl -fsSL "${_base}/omnisec.env" -o "${_src}/omnisec.env" 2>/dev/null || true
+    fi
+    SRC_DIR="${_src}"
+
+    # Install launchers
+    for f in omnisec-env.sh omnisec-postgres-run omnisec-nats-run omnisec-daemon-run omnisec-api-run omnisec-dashboard-run; do
+        install -m 755 "${SRC_DIR}/libexec/${f}" "${LIBEXEC_DIR}/${f}"
+    done
+    success "Installed launchers to ${LIBEXEC_DIR}"
+
+    # Render config env with per-OS paths. API key was set by ensure_api_key().
+    ensure_api_key
+    cat > "${CONFIG_ENV}" <<ENVEOF
+# OmniSec configuration — generated by the installer. Sourced by service launchers.
+DATABASE_URL=postgres://omnisec:omnisec@127.0.0.1:${POSTGRES_PORT}/omnisec
+NATS_URL=nats://127.0.0.1:${NATS_PORT}
+API_BIND=127.0.0.1:${API_PORT}
+DAEMON_HEALTH_BIND=127.0.0.1:${DAEMON_HEALTH_PORT}
+DASHBOARD_PORT=${DASHBOARD_PORT}
+NATS_PORT=${NATS_PORT}
+OMNISEC_PGDATA=${PGDATA}
+OMNISEC_NATS_STORE=${NATS_STORE}
+OMNISEC_PGBIN=${PGBIN}
+OMNISEC_DASHBOARD_DIR=${DASH_DIR}
+NEXT_PUBLIC_API_URL=http://127.0.0.1:${API_PORT}
+OMNISEC_SAFE_MODE=0
+OMNISEC_RECOMMENDATION_ONLY=0
+OMNISEC_API_KEY=${OMNISEC_API_KEY}
+RUST_LOG=info
+ENVEOF
+    chmod 640 "${CONFIG_ENV}"
+    chown root:"$(id -gn ${SERVICE_USER} 2>/dev/null || echo ${SERVICE_USER})" "${CONFIG_ENV}" 2>/dev/null || true
+    success "Wrote ${CONFIG_ENV}"
+}
+
+# =============================================================================
+# Register + start services
+# =============================================================================
+register_services_linux() {
+    step "Registering systemd services"
+    for f in omnisec-postgres omnisec-nats omnisec-daemon omnisec-api omnisec-dashboard; do
+        [ -f "${SRC_DIR}/systemd/${f}.service" ] && install -m 644 "${SRC_DIR}/systemd/${f}.service" "/etc/systemd/system/${f}.service"
+    done
+    install -m 644 "${SRC_DIR}/systemd/omnisec.target" /etc/systemd/system/omnisec.target 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable omnisec-postgres omnisec-nats omnisec-daemon omnisec-api >/dev/null 2>&1 || true
+    [ "${SKIP_DASHBOARD:-0}" = "1" ] || systemctl enable omnisec-dashboard >/dev/null 2>&1 || true
+    systemctl enable omnisec.target >/dev/null 2>&1 || true
+
+    info "Starting services in order..."
+    systemctl start omnisec-postgres; sleep 2
+    systemctl start omnisec-nats; sleep 1
+    systemctl start omnisec-daemon
+    systemctl start omnisec-api
+    [ "${SKIP_DASHBOARD:-0}" = "1" ] || systemctl start omnisec-dashboard
+    success "systemd services started"
+}
+
+register_services_macos() {
+    step "Registering launchd services"
+    for f in postgres nats daemon api dashboard; do
+        [ "${f}" = "dashboard" ] && [ "${SKIP_DASHBOARD:-0}" = "1" ] && continue
+        install -m 644 "${SRC_DIR}/launchd/com.omnisec.${f}.plist" "/Library/LaunchDaemons/com.omnisec.${f}.plist"
+    done
+    info "Bootstrapping services in order..."
+    for f in postgres nats daemon api dashboard; do
+        [ "${f}" = "dashboard" ] && [ "${SKIP_DASHBOARD:-0}" = "1" ] && continue
+        _plist="/Library/LaunchDaemons/com.omnisec.${f}.plist"
+        launchctl bootstrap system "${_plist}" 2>/dev/null || launchctl load -w "${_plist}" 2>/dev/null || true
+        [ "${f}" = "postgres" ] && sleep 2
+    done
+    success "launchd services started"
+}
+
+# =============================================================================
+# Verification
+# =============================================================================
+verify() {
+    step "Verification"
+    OK=true
+
+    # PostgreSQL
+    i=0; pg_ok=false
+    while [ $i -lt 30 ]; do
+        if as_service_user "'${PGBIN}/pg_isready' -h 127.0.0.1 -p ${POSTGRES_PORT}" >/dev/null 2>&1; then pg_ok=true; break; fi
+        sleep 1; i=$((i + 1))
+    done
+    $pg_ok && success "PostgreSQL responding on 127.0.0.1:${POSTGRES_PORT}" || { fail "PostgreSQL not responding"; OK=false; }
+
+    # NATS
+    i=0; nats_ok=false
+    while [ $i -lt 15 ]; do
+        if curl -fsS "http://127.0.0.1:8222/healthz" >/dev/null 2>&1 || (exec 3<>"/dev/tcp/127.0.0.1/${NATS_PORT}") 2>/dev/null; then nats_ok=true; break; fi
+        sleep 1; i=$((i + 1))
+    done
+    $nats_ok && success "NATS responding on 127.0.0.1:${NATS_PORT}" || warn "NATS health not confirmed (may still be starting)"
+
+    # Daemon
+    i=0; d_ok=false
+    while [ $i -lt 30 ]; do
+        if curl -fsS "http://127.0.0.1:${DAEMON_HEALTH_PORT}/health" >/dev/null 2>&1; then d_ok=true; break; fi
+        sleep 1; i=$((i + 1))
+    done
+    $d_ok && success "Daemon health OK on 127.0.0.1:${DAEMON_HEALTH_PORT}" || { fail "Daemon health endpoint not responding"; OK=false; }
+
+    # API
+    i=0; a_ok=false
+    while [ $i -lt 30 ]; do
+        if curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then a_ok=true; break; fi
+        sleep 1; i=$((i + 1))
+    done
+    $a_ok && success "API health OK on 127.0.0.1:${API_PORT}" || { fail "API health endpoint not responding"; OK=false; }
+
+    # Dashboard
+    if [ "${SKIP_DASHBOARD:-0}" != "1" ]; then
+        i=0; w_ok=false
+        while [ $i -lt 30 ]; do
+            if curl -fsS "http://127.0.0.1:${DASHBOARD_PORT}" >/dev/null 2>&1; then w_ok=true; break; fi
+            sleep 1; i=$((i + 1))
+        done
+        $w_ok && success "Dashboard responding on 127.0.0.1:${DASHBOARD_PORT}" || warn "Dashboard not yet responding"
+    fi
+
+    [ "$OK" = "true" ] && return 0 || return 1
+}
+
+summary() {
+    printf "\n"
+    printf "╔═══════════════════════════════════════════════════════════════╗\n"
+    if verify; then
+        printf "║              OmniSec Installation Complete                    ║\n"
+    else
+        printf "║           OmniSec Installed (with warnings)                  ║\n"
+    fi
+    printf "╚═══════════════════════════════════════════════════════════════╝\n\n"
+    printf "  Dashboard:  http://127.0.0.1:%s\n" "${DASHBOARD_PORT}"
+    printf "  API:        http://127.0.0.1:%s\n" "${API_PORT}"
+    printf "  API Key:    %s\n" "${OMNISEC_API_KEY}"
+    printf "  Config:     %s\n\n" "${CONFIG_ENV}"
+    if [ "${OS_KIND}" = "linux" ]; then
+        printf "  Manage:     sudo systemctl status omnisec-daemon\n"
+        printf "  Logs:       sudo journalctl -u omnisec-daemon -f\n"
+        printf "  Stop all:   sudo systemctl stop omnisec.target\n"
+    else
+        printf "  Manage:     sudo launchctl print system/com.omnisec.daemon\n"
+        printf "  Logs:       tail -f %s/daemon.log\n" "${LOG_DIR}"
+    fi
+    printf "  Doctor:     sudo omnisec-doctor\n"
+    printf "  Uninstall:  sudo sh deploy/install.sh --uninstall\n\n"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
 printf "\n"
 printf "╔═══════════════════════════════════════════════════════════════╗\n"
-if [ "$OVERALL_PASS" = true ]; then
-printf "║  Status: ✅ INSTALLATION SUCCESSFUL                          ║\n"
-else
-printf "║  Status: ⚠️ INSTALLED WITH WARNINGS                         ║\n"
-fi
+printf "║         OmniSec — Host-Native Installer (no Docker)          ║\n"
 printf "╚═══════════════════════════════════════════════════════════════╝\n"
-printf "\n"
 
-# Try to open dashboard
-case "${OS}" in
-    Linux)
-        (xdg-open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true) &
-        ;;
-    Darwin)
-        (open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true) &
-        ;;
-esac
+detect_platform
+require_root
+info "Platform: ${OS_TAG}/${ARCH}"
+
+[ "${DO_UNINSTALL}" = "1" ] && uninstall
+
+has_cmd curl || die "curl is required."
+
+ensure_api_key
+create_service_user
+create_directories
+install_postgres
+install_nats
+init_database
+download_artifacts
+install_launchers
+bootstrap_db_role
+
+if [ "${OS_KIND}" = "linux" ]; then
+    register_services_linux
+else
+    register_services_macos
+fi
+
+summary

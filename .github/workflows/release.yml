@@ -1,0 +1,169 @@
+# =============================================================================
+# OmniSec Release — host-native binaries + dashboard bundle
+# =============================================================================
+# Builds release artifacts for the curl|sh installer:
+#   omnisec-daemon / omnisec-api / omnisec-doctor  for:
+#     linux/amd64, linux/arm64, darwin/amd64, darwin/arm64
+#   omnisec-dashboard.tar.gz  (Next.js standalone bundle, placeholder API key)
+#
+# Triggers: tag v* (stable release) and manual dispatch (dev prerelease).
+# No Docker anywhere — these artifacts install directly onto the host.
+# =============================================================================
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: "Binaries (${{ matrix.os_tag }}-${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu,  os_tag: linux,  arch: amd64, cross: false }
+          - { runner: ubuntu-24.04, target: aarch64-unknown-linux-gnu, os_tag: linux,  arch: arm64, cross: true  }
+          - { runner: macos-13,     target: x86_64-apple-darwin,       os_tag: darwin, arch: amd64, cross: false }
+          - { runner: macos-14,     target: aarch64-apple-darwin,      os_tag: darwin, arch: arm64, cross: false }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install ARM64 cross toolchain
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-rel-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-rel-
+
+      - name: Build binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --bin omnisec-daemon --bin omnisec-api --bin omnisec-doctor
+
+      - name: Stage + strip artifacts
+        run: |
+          DIR="/tmp/artifacts"; mkdir -p "$DIR"
+          STRIP=strip
+          [ "${{ matrix.cross }}" = "true" ] && STRIP=aarch64-linux-gnu-strip
+          for b in omnisec-daemon omnisec-api omnisec-doctor; do
+            BIN="target/${{ matrix.target }}/release/$b"
+            $STRIP "$BIN" 2>/dev/null || true
+            cp "$BIN" "$DIR/${b}-${{ matrix.os_tag }}-${{ matrix.arch }}"
+          done
+          ls -lh "$DIR"
+
+      - name: Verify native binary runs
+        if: matrix.cross == false
+        run: target/${{ matrix.target }}/release/omnisec-daemon --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.os_tag }}-${{ matrix.arch }}
+          path: /tmp/artifacts/*
+
+  dashboard:
+    name: "Dashboard bundle"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build standalone bundle
+        working-directory: apps/dashboard
+        run: |
+          npm install
+          NEXT_PUBLIC_API_URL="http://omnisec-api-placeholder:3002" \
+          NEXT_PUBLIC_API_KEY="__OMNISEC_API_KEY__" \
+          npm run build
+      - name: Package bundle
+        working-directory: apps/dashboard
+        run: |
+          mkdir -p pkg
+          cp -R .next/standalone/. pkg/
+          mkdir -p pkg/.next
+          cp -R .next/static pkg/.next/static
+          [ -d public ] && cp -R public pkg/public || true
+          tar -czf /tmp/omnisec-dashboard.tar.gz -C pkg .
+          ls -lh /tmp/omnisec-dashboard.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard
+          path: /tmp/omnisec-dashboard.tar.gz
+
+  publish:
+    name: "Publish GitHub Release"
+    runs-on: ubuntu-24.04
+    needs: [binaries, dashboard]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v0.1.0-dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Collect + checksum
+        run: |
+          mkdir -p release-assets
+          find ./artifacts -type f -exec cp {} ./release-assets/ \;
+          cd release-assets
+          for f in *; do
+            [[ "$f" =~ \.sha256$ ]] && continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -lh
+
+      - name: Verify expected artifacts
+        run: |
+          cd release-assets
+          MISSING=0
+          for f in \
+            omnisec-daemon-linux-amd64 omnisec-daemon-linux-arm64 \
+            omnisec-daemon-darwin-amd64 omnisec-daemon-darwin-arm64 \
+            omnisec-api-linux-amd64 omnisec-doctor-linux-amd64 \
+            omnisec-dashboard.tar.gz; do
+            [ -f "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; MISSING=$((MISSING+1)); }
+          done
+          [ "$MISSING" -eq 0 ] || { echo "Missing $MISSING artifacts"; exit 1; }
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "OmniSec ${{ steps.tag.outputs.tag }}"
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

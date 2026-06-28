@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.omnisec.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/omnisec/omnisec-daemon-run</string>
+    </array>
+    <!-- Runs as root: needs native host capabilities (sysctl, pf, kqueue, signals). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/omnisec/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/omnisec/daemon.err</string>
+</dict>
+</plist>

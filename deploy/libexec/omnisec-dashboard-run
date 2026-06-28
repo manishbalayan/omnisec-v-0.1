@@ -1,0 +1,10 @@
+#!/bin/sh
+# OmniSec dashboard launcher — Next.js standalone server (loopback only).
+set -eu
+. /usr/local/libexec/omnisec/omnisec-env.sh
+
+DASHBOARD_DIR="${OMNISEC_DASHBOARD_DIR:-/opt/omnisec/dashboard}"
+export PORT="${DASHBOARD_PORT:-3000}"
+export HOSTNAME=127.0.0.1
+
+exec node "${DASHBOARD_DIR}/server.js"

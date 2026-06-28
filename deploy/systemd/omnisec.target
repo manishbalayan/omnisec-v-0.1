@@ -1,0 +1,8 @@
+[Unit]
+Description=OmniSec — all host-native services
+Documentation=https://github.com/manishbalayan/omnisec-v-0.1
+Wants=omnisec-postgres.service omnisec-nats.service omnisec-daemon.service omnisec-api.service omnisec-dashboard.service
+After=omnisec-postgres.service omnisec-nats.service omnisec-daemon.service omnisec-api.service omnisec-dashboard.service
+
+[Install]
+WantedBy=multi-user.target

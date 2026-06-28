@@ -161,7 +161,7 @@ async fn check_postgres() -> CheckResult {
         Err(e) => CheckResult::fail(
             "postgres",
             &format!("cannot connect to {}: {}", addr, e),
-            "docker compose up -d postgres  OR  systemctl start postgresql",
+            "sudo systemctl start omnisec-postgres  (Linux)  OR  sudo launchctl kickstart -k system/com.omnisec.postgres  (macOS)",
         ),
     }
 }
@@ -175,7 +175,7 @@ async fn check_nats() -> CheckResult {
         Err(e) => CheckResult::fail(
             "nats",
             &format!("cannot connect to {}: {}", addr, e),
-            "docker compose up -d nats  OR  nats-server -js &",
+            "sudo systemctl start omnisec-nats  (Linux)  OR  sudo launchctl kickstart -k system/com.omnisec.nats  (macOS)",
         ),
     }
 }

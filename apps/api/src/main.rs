@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let bind =
-        std::env::var("API_BIND").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+        std::env::var("API_BIND").unwrap_or_else(|_| "127.0.0.1:3002".to_string());
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("API listening on {}", bind);

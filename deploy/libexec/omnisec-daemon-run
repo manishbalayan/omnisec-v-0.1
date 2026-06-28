@@ -1,0 +1,7 @@
+#!/bin/sh
+# OmniSec daemon launcher — the core product. Runs as root so it can use
+# native host capabilities (/proc, ptrace, nftables/pf, cgroups, inotify/kqueue).
+set -eu
+. /usr/local/libexec/omnisec/omnisec-env.sh
+
+exec /usr/local/bin/omnisec-daemon

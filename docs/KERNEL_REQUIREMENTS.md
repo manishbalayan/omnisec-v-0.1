@@ -107,29 +107,18 @@ ls /sys/kernel/debug/tracing/events/sched/sched_process_exec/ && echo "Exec trac
 ls /sys/kernel/debug/tracing/events/syscalls/sys_enter_openat/ && echo "Openat tracepoint: OK"
 ```
 
-## Container Environments
+## Host Deployment
 
-### Docker
-```dockerfile
-FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y bpftrace
-COPY omnisec-daemon /usr/local/bin/
+OmniSec runs host-natively. The daemon runs as root (via its systemd unit on
+Linux), so eBPF programs load with full privileges — no capability wiring or
+container runtime configuration is required.
 
-# Required when running
-# docker run --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN ...
-```
+If you choose to harden the daemon's systemd unit with a restricted capability
+set, grant: `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN`, `CAP_SYS_RESOURCE`.
 
-### Kubernetes
-```yaml
-securityContext:
-  capabilities:
-    add:
-      - BPF
-      - PERFMON
-      - NET_ADMIN
-```
-
-**Note**: Some container runtimes (containerd, CRI-O) may need additional seccomp profile configuration.
+The host kernel must satisfy the requirements above (BTF/CO-RE, kernel ≥ 5.4
+recommended). Because OmniSec reads the host `/proc` directly — not a mounted
+proxy — agent discovery and monitoring see every process on the machine.
 
 ## Unsupported Configurations
 

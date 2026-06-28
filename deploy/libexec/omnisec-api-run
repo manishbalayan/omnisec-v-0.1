@@ -1,0 +1,6 @@
+#!/bin/sh
+# OmniSec API launcher — read-only REST API for the dashboard (loopback only).
+set -eu
+. /usr/local/libexec/omnisec/omnisec-env.sh
+
+exec /usr/local/bin/omnisec-api

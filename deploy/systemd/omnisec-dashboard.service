@@ -1,0 +1,21 @@
+[Unit]
+Description=OmniSec Dashboard — Next.js web interface
+Documentation=https://github.com/manishbalayan/omnisec-v-0.1
+After=omnisec-api.service
+Wants=omnisec-api.service
+PartOf=omnisec.target
+
+[Service]
+Type=simple
+User=omnisec
+Group=omnisec
+ExecStart=/usr/local/libexec/omnisec/omnisec-dashboard-run
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=omnisec.target

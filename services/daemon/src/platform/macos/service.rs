@@ -25,46 +25,6 @@ pub fn notify_watchdog() {
     // launchd monitors the process directly; no periodic ping needed.
 }
 
-/// Install (or update) the launchd plist so the daemon starts on boot.
-pub fn install_plist(binary_path: &str) {
-    const PLIST_PATH: &str = "/Library/LaunchDaemons/com.omnisec.daemon.plist";
-
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.omnisec.daemon</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/var/log/omnisec-daemon.log</string>
-  <key>StandardErrorPath</key>
-  <string>/var/log/omnisec-daemon.err</string>
-  <key>PIDFile</key>
-  <string>{}</string>
-</dict>
-</plist>
-"#,
-        binary_path, PID_FILE
-    );
-
-    match std::fs::write(PLIST_PATH, plist) {
-        Ok(_) => {
-            tracing::info!("launchd: plist written to {}", PLIST_PATH);
-            // Reload so launchd picks up the new file.
-            let _ = std::process::Command::new("launchctl")
-                .args(["load", "-w", PLIST_PATH])
-                .output();
-        }
-        Err(e) => tracing::warn!("launchd: failed to write plist: {}", e),
-    }
-}
+// Note: the launchd plist is installed and managed by the host-native installer
+// (deploy/launchd/com.omnisec.daemon.plist via deploy/install.sh), not by the
+// daemon itself. The daemon only reports readiness via the PID file above.

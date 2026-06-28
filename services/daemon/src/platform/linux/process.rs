@@ -2,20 +2,13 @@
 //!
 //! Reads /proc/{pid}/comm, /proc/{pid}/stat, and /proc/{pid}/cmdline
 //! to enumerate and inspect running processes.
-//!
-//! Supports Docker host-proc mounts: when /host/proc exists the daemon
-//! reads that path so it can see host-side processes from inside a container.
 
 use super::super::ProcessEntry;
 use std::fs;
 
-/// Returns the /proc root: /host/proc when mounted (Docker), else /proc.
+/// Returns the host `/proc` root. OmniSec runs natively on the host.
 pub fn proc_root() -> &'static str {
-    if std::path::Path::new("/host/proc").exists() {
-        "/host/proc"
-    } else {
-        "/proc"
-    }
+    "/proc"
 }
 
 /// Enumerate all processes by scanning /proc.

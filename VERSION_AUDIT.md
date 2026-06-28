@@ -1,7 +1,15 @@
 # Omnisec v0.1.0 — Version Audit
 
 Generated: 2026-06-20
+Updated: 2026-06-28 (host-native transformation — Docker fully removed)
 Git Tag: v0.1.0
+
+> **Host-native transformation (2026-06-28):** OmniSec was converted from a
+> Docker-based deployment to host-native infrastructure software. All Docker
+> assets (Dockerfile, compose, supervisord, entrypoint) were removed; PostgreSQL,
+> NATS, daemon, API, and dashboard now run as native systemd/launchd services.
+> Five dead/orphaned crates (`metrics`, `models`, `sensor`, `restart`, `systemd`)
+> and a root `Hello, world!` stub were deleted (25 → 20 crates).
 
 ---
 
@@ -9,12 +17,12 @@ Git Tag: v0.1.0
 
 | Category | Count |
 |---|---|
-| **Total Rust crates** | 25 |
-| **Total services** | 5 |
-| **Total apps** | 2 |
-| **Database migrations** | 5 |
-| **Dockerfiles** | 6 |
-| **Config files (yml/yaml)** | 2 |
+| **Total Rust crates** | 20 |
+| **Total services** | 3 (daemon, doctor, support-bundle) |
+| **Total apps** | 2 (api, dashboard) |
+| **Database migrations** | 7 |
+| **Dockerfiles** | 0 (host-native) |
+| **Config files (yml/yaml)** | 3 workflows (ci, release, certification) |
 | **Total source files (.rs)** | 70 |
 | **Total test files (.rs)** | 19 |
 | **Total files copied** | 158 |

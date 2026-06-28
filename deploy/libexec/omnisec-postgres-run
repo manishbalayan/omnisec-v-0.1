@@ -1,0 +1,9 @@
+#!/bin/sh
+# OmniSec-managed PostgreSQL launcher (foreground, for systemd/launchd).
+set -eu
+. /usr/local/libexec/omnisec/omnisec-env.sh
+
+PGDATA="${OMNISEC_PGDATA:-/var/lib/omnisec/postgres}"
+PGBIN="${OMNISEC_PGBIN:-/usr/lib/postgresql/16/bin}"
+
+exec "${PGBIN}/postgres" -D "${PGDATA}"

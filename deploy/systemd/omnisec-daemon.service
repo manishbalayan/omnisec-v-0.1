@@ -1,0 +1,20 @@
+[Unit]
+Description=OmniSec Daemon — host-native runtime control plane for AI agents
+Documentation=https://github.com/manishbalayan/omnisec-v-0.1
+After=network-online.target omnisec-postgres.service omnisec-nats.service
+Wants=network-online.target
+Requires=omnisec-postgres.service omnisec-nats.service
+PartOf=omnisec.target
+
+[Service]
+Type=notify
+# Runs as root: needs native host capabilities (/proc, ptrace, nftables,
+# cgroups, inotify). This is the core product.
+ExecStart=/usr/local/libexec/omnisec/omnisec-daemon-run
+Restart=always
+RestartSec=10
+WatchdogSec=30
+TimeoutStartSec=120
+
+[Install]
+WantedBy=omnisec.target

@@ -58,15 +58,12 @@ The daemon requires these capabilities to load eBPF programs:
 | `CAP_NET_ADMIN` | Network-related BPF operations |
 | `CAP_SYS_RESOURCE` | Locked memory for BPF maps |
 
-When running with systemd, add to the unit file:
+OmniSec's daemon runs as root, so it already has the capabilities it needs.
+If you run it under a hardened systemd unit with a restricted capability set,
+ensure these are granted:
 ```
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_RESOURCE
 AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_RESOURCE
-```
-
-When running in Docker, add:
-```bash
-docker run --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN ...
 ```
 
 ## Installation

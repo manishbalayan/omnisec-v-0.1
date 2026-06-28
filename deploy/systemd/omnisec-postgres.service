@@ -1,0 +1,21 @@
+[Unit]
+Description=OmniSec PostgreSQL
+Documentation=https://github.com/manishbalayan/omnisec-v-0.1
+After=network.target
+PartOf=omnisec.target
+
+[Service]
+Type=simple
+User=omnisec
+Group=omnisec
+ExecStart=/usr/local/libexec/omnisec/omnisec-postgres-run
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/omnisec /var/log/omnisec /var/run/omnisec
+
+[Install]
+WantedBy=omnisec.target

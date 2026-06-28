@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
                 Ok(client) => break Arc::new(client),
                 Err(e) => {
                     if attempt >= 12 {
-                        tracing::error!("NATS unavailable after 12 attempts — exiting so supervisor can retry: {}", e);
+                        tracing::error!("NATS unavailable after 12 attempts — exiting so the service manager (systemd/launchd) can retry: {}", e);
                         std::process::exit(1);
                     }
                     tracing::warn!("NATS connect attempt {}/12 failed, retrying in 5s: {}", attempt, e);
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     if attempt >= max_attempts {
-                        tracing::error!("Database unavailable after {} attempts — exiting so supervisor can retry: {}", max_attempts, e);
+                        tracing::error!("Database unavailable after {} attempts — exiting so the service manager (systemd/launchd) can retry: {}", max_attempts, e);
                         std::process::exit(1);
                     }
                     tracing::warn!("DB connect attempt {}/{} failed, retrying in 5s: {}", attempt, max_attempts, e);
@@ -1938,7 +1938,7 @@ async fn main() -> Result<()> {
         axum::routing::get(move || health_handler(health_state)),
     );
     let health_bind =
-        std::env::var("DAEMON_HEALTH_BIND").unwrap_or_else(|_| "0.0.0.0:3003".to_string());
+        std::env::var("DAEMON_HEALTH_BIND").unwrap_or_else(|_| "127.0.0.1:3003".to_string());
     let health_listener = tokio::net::TcpListener::bind(&health_bind).await?;
     tracing::info!("Daemon health endpoint listening on {}", health_bind);
     let _ = health_dp; // passed via closure capture below — suppress unused warning
