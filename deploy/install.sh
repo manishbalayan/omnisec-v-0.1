@@ -124,6 +124,35 @@ as_service_user() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Homebrew (macOS): Homebrew hard-refuses to run as root, so brew must be
+# invoked as the admin user who ran `sudo` (SUDO_USER), never as root or the
+# unprivileged service account. These helpers locate brew in that user's
+# context and run it with their privileges.
+# -----------------------------------------------------------------------------
+BREW_USER="${SUDO_USER:-}"
+BREW_BIN=""
+
+# Resolve the brew binary for the invoking admin user. Caches into BREW_BIN.
+resolve_brew() {
+    [ -n "${BREW_BIN}" ] && return 0
+    [ -n "${BREW_USER}" ] && [ "${BREW_USER}" != "root" ] || return 1
+    for cand in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        [ -x "$cand" ] && { BREW_BIN="$cand"; return 0; }
+    done
+    # Fall back to the user's own login PATH.
+    BREW_BIN="$(sudo -u "${BREW_USER}" -i sh -c 'command -v brew' 2>/dev/null || true)"
+    [ -n "${BREW_BIN}" ]
+}
+
+has_brew() { resolve_brew; }
+
+# Run `brew <args>` as the invoking admin user.
+run_brew() {
+    resolve_brew || return 1
+    sudo -u "${BREW_USER}" -H "${BREW_BIN}" "$@"
+}
+
 # =============================================================================
 # UNINSTALL
 # =============================================================================
@@ -206,7 +235,8 @@ detect_pgbin() {
         "${OMNISEC_PGBIN:-}" \
         $(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1) \
         $(ls -d /usr/pgsql-*/bin 2>/dev/null | sort -V | tail -1) \
-        /usr/local/opt/postgresql@16/bin /usr/local/opt/postgresql@15/bin /opt/homebrew/opt/postgresql@16/bin \
+        /usr/local/opt/postgresql@16/bin /usr/local/opt/postgresql@15/bin \
+        /opt/homebrew/opt/postgresql@16/bin /opt/homebrew/opt/postgresql@15/bin \
         /usr/local/bin /usr/bin /opt/homebrew/bin; do
         [ -n "$cand" ] || continue
         if [ -x "$cand/postgres" ] && [ -x "$cand/initdb" ]; then
@@ -238,8 +268,12 @@ install_postgres() {
             die "No supported package manager found. Install PostgreSQL manually and re-run."
         fi
     else
-        has_cmd brew || die "Homebrew required on macOS. Install from https://brew.sh then re-run."
-        as_service_user "brew install postgresql@16" 2>/dev/null || brew install postgresql@16 >/dev/null
+        if ! has_brew; then
+            die "Homebrew is required on macOS but was not found for user '${BREW_USER:-<none>}'. Homebrew cannot run as root — install it as your normal admin user from https://brew.sh, then re-run this installer with sudo."
+        fi
+        info "Installing PostgreSQL via Homebrew (as ${BREW_USER})..."
+        run_brew install postgresql@16 >/dev/null 2>&1 || run_brew install postgresql@16 \
+            || die "brew install postgresql@16 failed (run as ${BREW_USER})."
     fi
     PGBIN=$(detect_pgbin) || die "PostgreSQL installation did not produce usable binaries."
     success "PostgreSQL installed at ${PGBIN}"
@@ -295,9 +329,9 @@ install_nats() {
         return 0
     fi
     info "Installing nats-server ${NATS_VERSION}..."
-    if [ "${OS_KIND}" = "macos" ] && has_cmd brew; then
-        brew install nats-server >/dev/null && { success "nats-server installed via Homebrew"; return 0; }
-    fi
+    # Always install the static release binary to ${INSTALL_BIN} (a known path
+    # the root-run services can find). This avoids Homebrew's root refusal and
+    # any admin-user PATH that the system services would not inherit.
     _tgz="nats-server-v${NATS_VERSION}-${NATS_OS}-${ARCH}.tar.gz"
     _url="https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/${_tgz}"
     _tmp=$(mktemp -d)

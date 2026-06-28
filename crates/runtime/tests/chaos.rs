@@ -22,12 +22,27 @@ use omnisec_runtime::{
     audit::KernelAuditTrail,
 };
 
+/// These chaos tests validate the enforcement bookkeeping and audit trail —
+/// not real kernel mutations. Native mode would require root + nftables/pf and
+/// is non-deterministic across hosts/CI, so we pin the runtime to simulated
+/// mode before any engine is constructed.
+///
+/// `Once::call_once` blocks every caller until initialization completes, so the
+/// env var is guaranteed set before the first `*Engine::new()` runs, even when
+/// tests execute in parallel. Every test calls this as its first statement.
+fn force_simulated_mode() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| std::env::set_var("OMNISEC_RUNTIME_MODE", "simulated"));
+}
+
 // =====================================================================
 // Scenario 1: Malicious Destination → nftables block
 // =====================================================================
 
 #[test]
 fn chaos_malicious_destination_blocked() {
+    force_simulated_mode();
     let mut engine = NetworkBlockEngine::new();
 
     let action = engine.block_domain("evil.c2.com", "Known malicious C2 server");
@@ -43,6 +58,7 @@ fn chaos_malicious_destination_blocked() {
 
 #[test]
 fn chaos_unknown_binary_detected() {
+    force_simulated_mode();
     // This test verifies the process containment engine works with
     // unknown executables through the enforcement pipeline.
     let engine = ProcessContainmentEngine::new();
@@ -57,6 +73,7 @@ fn chaos_unknown_binary_detected() {
 
 #[test]
 fn chaos_sensitive_file_access_flagged() {
+    force_simulated_mode();
     let mut engine = FileMonitorEngine::new();
 
     // Sensitive file access
@@ -79,6 +96,7 @@ fn chaos_sensitive_file_access_flagged() {
 
 #[test]
 fn chaos_exfiltration_blocked_with_audit() {
+    force_simulated_mode();
     let mut network = NetworkBlockEngine::new();
     let mut audit = KernelAuditTrail::new();
 
@@ -102,6 +120,7 @@ fn chaos_exfiltration_blocked_with_audit() {
 
 #[test]
 fn chaos_cpu_runaway_throttled() {
+    force_simulated_mode();
     let mut engine = ResourceControlEngine::new();
 
     // Simulate: agent consuming 95% CPU → throttle to 25%
@@ -117,6 +136,7 @@ fn chaos_cpu_runaway_throttled() {
 
 #[test]
 fn chaos_memory_abuse_contained() {
+    force_simulated_mode();
     let mut engine = ResourceControlEngine::new();
 
     // Contain the process with strict limits
@@ -133,6 +153,7 @@ fn chaos_memory_abuse_contained() {
 
 #[test]
 fn chaos_decision_to_kernel_action_audited() {
+    force_simulated_mode();
     let mut audit = KernelAuditTrail::new();
 
     // Simulate the full pipeline: decision → action → audit
@@ -154,6 +175,7 @@ fn chaos_decision_to_kernel_action_audited() {
 
 #[test]
 fn chaos_temp_block_auto_recovery() {
+    force_simulated_mode();
     let mut recovery = RecoveryEngine::new();
 
     // Register a temporary block (1 second duration for fast test)
@@ -180,6 +202,7 @@ fn chaos_temp_block_auto_recovery() {
 
 #[test]
 fn chaos_process_quarantine_with_audit() {
+    force_simulated_mode();
     let mut process = ProcessContainmentEngine::new();
     let mut audit = KernelAuditTrail::new();
 
@@ -206,6 +229,7 @@ fn chaos_process_quarantine_with_audit() {
 
 #[test]
 fn chaos_recovery_rollback() {
+    force_simulated_mode();
     let mut recovery = RecoveryEngine::new();
 
     // Register blocks with different durations
@@ -239,6 +263,7 @@ fn chaos_recovery_rollback() {
 
 #[test]
 fn chaos_runtime_manager_e2e() {
+    force_simulated_mode();
     let mut manager = RuntimeManager::new();
 
     // Verify initial state

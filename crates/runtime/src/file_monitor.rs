@@ -374,9 +374,15 @@ fn inotify_reader(
         let n = n as usize;
 
         while offset + std::mem::size_of::<libc::inotify_event>() <= n {
-            // SAFETY: aligned read of inotify_event from our buffer
-            let evt = unsafe {
-                &*(buf.as_ptr().add(offset) as *const libc::inotify_event)
+            // `buf` is a [u8] (alignment 1), so the bytes at `offset` are not
+            // guaranteed to satisfy inotify_event's 4-byte alignment. Reading a
+            // &inotify_event reference from an unaligned address is UB and aborts
+            // under debug alignment checks ("misaligned pointer dereference").
+            // Copy the fixed-size header out with an unaligned read instead.
+            // SAFETY: the loop guard guarantees size_of::<inotify_event>() bytes
+            // remain in `buf` starting at `offset`.
+            let evt: libc::inotify_event = unsafe {
+                std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const libc::inotify_event)
             };
 
             let action = inotify_mask_to_action(evt.mask);
